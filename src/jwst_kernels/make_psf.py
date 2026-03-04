@@ -41,14 +41,15 @@ def save_miri_PSF(miri_psfs, output_dir=None, **kwargs):
         print('output dir not specified, using current directory')
         print(output_dir)
 
-    oversample_factor = kwargs.pop("oversample_factor", 4)
-    detector_oversample = kwargs.pop("oversample_factor", 4)
+    oversample_factor = kwargs.pop("oversample_factor", 5)
+    detector_oversample = kwargs.pop("oversample_factor", 5)
     fov_arcsec = kwargs.pop("fov_arcsec", 19.98)
   
     for filter1 in miri_psfs:
         print('building PSF '+filter1)
     
         miri = webbpsf.MIRI()
+        miri.options['parity'] = 'odd'
         
         miri.filter = filter1
         psf_array = miri.calc_psf(oversample=oversample_factor,
@@ -75,14 +76,15 @@ def save_nircam_PSF(nircam_psfs, output_dir=None, **kwargs):
         output_dir = path.abspath('.')
         print('output dir not specified, using current directory')
 
-    oversample_factor = kwargs.pop("oversample_factor", 4)
-    detector_oversample = kwargs.pop("oversample_factor", 4)
+    oversample_factor = kwargs.pop("oversample_factor", 5)
+    detector_oversample = kwargs.pop("oversample_factor", 5)
     fov_arcsec = kwargs.pop("fov_arcsec", 10)
     
     for filter1 in nircam_psfs:
         print('building PSF '+filter1)
     
         nircam = webbpsf.NIRCam()
+        nircam.options['parity'] = 'odd'
         
         nircam.filter = filter1
         psf_array = nircam.calc_psf(oversample=oversample_factor,

@@ -17,36 +17,39 @@ import os
 
 PIXEL_SCALE_NAMES = ['XPIXSIZE', 'CDELT1', 'CD1_1', 'PIXELSCL']
 
-def profile(psf,bins=None, pixscale=1):
-    
+
+def profile(psf, bins=None, pixscale=1):
+
     i_cen = (psf.shape[0] - 1) / 2
     j_cen = (psf.shape[1] - 1) / 2
 
     ji, ii = np.meshgrid((np.arange(psf.shape[1]) - j_cen),
-                        (np.arange(psf.shape[0]) - i_cen))
-    dis = (ji**2 + ii**2)**0.5*pixscale
-    
+                         (np.arange(psf.shape[0]) - i_cen))
+    dis = (ji**2 + ii**2)**0.5 * pixscale
+
     if bins is None:
-        guess_sigma = np.sum(ii[:,int(i_cen)]**2*psf[:,int(i_cen)]/np.sum(psf[:,int(i_cen)]))**0.5*pixscale
-        extent = np.min([psf.shape[0]/2*pixscale, guess_sigma*5])
-        bins = np.linspace(0, int(extent), int(extent/pixscale/2))
-            
- 
+        guess_sigma = np.sum(ii[:, int(i_cen)]**2 * psf[:, int(i_cen)] /
+                             np.sum(psf[:, int(i_cen)]))**0.5 * pixscale
+        extent = np.min([psf.shape[0] / 2 * pixscale, guess_sigma * 5])
+        bins = np.linspace(0, int(extent), int(extent / pixscale / 2))
+
     bin_means = (np.histogram(dis, bins, weights=psf)[0] /
                  np.histogram(dis, bins)[0])
 
-    norm_bins = (bins[:-1]+np.diff(bins)/2)
+    norm_bins = (bins[:-1] + np.diff(bins) / 2)
     return norm_bins, bin_means
 
 
 def get_fwhm(psf, pixscale=1):
 
-    psf=psf/np.nanmax(psf)
-    norm_bins, bin_means = profile(psf,  pixscale=pixscale)
+    psf = psf / np.nanmax(psf)
+    norm_bins, bin_means = profile(psf, pixscale=pixscale)
 
-    hwhm = np.interp(0.5, bin_means[::-1]/np.nanmax(bin_means), norm_bins[::-1])
-    fwhm = 2*hwhm
+    hwhm = np.interp(0.5, bin_means[::-1] / np.nanmax(bin_means),
+                     norm_bins[::-1])
+    fwhm = 2 * hwhm
     return fwhm
+
 
 def get_pixscale(hdu):
     """Get pixel scale from header.
@@ -64,11 +67,11 @@ def get_pixscale(hdu):
         Warning: If no suitable pixel scale keyword is found in header.
 
     """
-    if isinstance(hdu, (fits.hdu.image.PrimaryHDU, fits.hdu.image.ImageHDU) ):
-        header =hdu.header
-    elif isinstance(hdu, fits.header.Header ):
-        header =hdu
-    
+    if isinstance(hdu, (fits.hdu.image.PrimaryHDU, fits.hdu.image.ImageHDU)):
+        header = hdu.header
+    elif isinstance(hdu, fits.header.Header):
+        header = hdu
+
     for pixel_keyword in PIXEL_SCALE_NAMES:
         try:
             try:
@@ -102,13 +105,15 @@ def fit_2d_gaussian(data, pixscale=None):
         ji *= pixscale
         ii *= pixscale
 
-    guess_sigma = np.sum(ii[:,int(i_cen)]**2*data[:,int(i_cen)]/np.sum(data[:,int(i_cen)]))**0.5
+    guess_sigma = np.sum(ii[:, int(i_cen)]**2 * data[:, int(i_cen)] /
+                         np.sum(data[:, int(i_cen)]))**0.5
     # Set up model
     model = models.Gaussian2D(amplitude=1,
-                              x_mean=0, y_mean=0,
-                              x_stddev=guess_sigma, y_stddev=guess_sigma,
-                              theta=0
-                              )
+                              x_mean=0,
+                              y_mean=0,
+                              x_stddev=guess_sigma,
+                              y_stddev=guess_sigma,
+                              theta=0)
     fitter = fitting.LevMarLSQFitter()
     fit = fitter(model, ji, ii, data)
 
@@ -162,7 +167,9 @@ def resample(data, source_pixscale, target_pixscale, interp_order=3):
 
     """
 
-    data_resample = zoom(data, source_pixscale / target_pixscale, order=interp_order)
+    data_resample = zoom(data,
+                         source_pixscale / target_pixscale,
+                         order=interp_order)
 
     # force odd-sized array - the kernel needs to be odd
 
@@ -189,7 +196,7 @@ def circularise(data, rotations=14):
     """
 
     for n in range(rotations, 0, -1):
-        data_rotate = rotate(data, 360 / (2 ** n), order=3, reshape=False)
+        data_rotate = rotate(data, 360 / (2**n), order=3, reshape=False)
         data = 0.5 * (data + data_rotate)
 
     # Set anything outside the maximum radius contained within the whole square to be 0
@@ -201,8 +208,8 @@ def circularise(data, rotations=14):
     ji, ii = np.meshgrid((np.arange(data.shape[1]) - j_cen),
                          (np.arange(data.shape[0]) - i_cen))
 
-    ri = ji ** 2 + ii ** 2
-    data[ri > radius ** 2] = 0
+    ri = ji**2 + ii**2
+    data[ri > radius**2] = 0
 
     # Round anything within machine uncertainty to 0
 
@@ -232,10 +239,10 @@ def resize(data, pixscale, grid_size_arcsec=None):
     grid_size_pix = grid_size_arcsec / pixscale
     grid_size_pix = np.array([int(grid_size_pix[0]), int(grid_size_pix[1])])
     #print('inside resize', data.shape, grid_size_pix)
-    
+
     if grid_size_pix[0] % 2 == 0:
         grid_size_pix += 1
-    
+
     if np.all(data.shape > grid_size_pix):
         data_resized = trim(data, grid_size_pix)
     elif np.all(data.shape < grid_size_pix):
@@ -324,14 +331,14 @@ def high_pass_filter(data, fwhm, pixscale=0.1):
 
     ji, ii = np.meshgrid((np.arange(data.shape[1]) - j_cen),
                          (np.arange(data.shape[0]) - i_cen))
-    ri = np.sqrt(ji ** 2 + ii ** 2) * pixscale
+    ri = np.sqrt(ji**2 + ii**2) * pixscale
 
     # Create filter
     data_filter = np.zeros(data.shape)
     data_filter[ri <= k_a] = 1
 
     idx = np.where((k_a < ri) & (ri <= k_b))
-    data_filter[idx] = np.exp(-(1.8249 * (ri[idx] - k_a) / (k_b - k_a)) ** 4)
+    data_filter[idx] = np.exp(-(1.8249 * (ri[idx] - k_a) / (k_b - k_a))**4)
 
     # Apply filter
     data_filtered = data_filter * data
@@ -348,16 +355,15 @@ def low_pass_filter(data, pixscale=0.1):
     i_range = data.shape[0]
     j_range = data.shape[1]
 
-    data_slice = data[
-                 int((i_range - 1) / 2):,
-                 int((j_range - 1) / 2)
-                 ]
+    data_slice = data[int((i_range - 1) / 2):, int((j_range - 1) / 2)]
     data_slice_max = np.nanmax(data_slice)
 
     try:
         k_h = np.where(data_slice < 0.005 * data_slice_max)[0][0] * pixscale
     except IndexError:
-        print('k_h too large. Something is probably up with kernel generation...')
+        print(
+            'k_h too large. Something is probably up with kernel generation...'
+        )
         k_h = len(data_slice) * pixscale
     k_l = 0.7 * k_h
 
@@ -366,13 +372,14 @@ def low_pass_filter(data, pixscale=0.1):
 
     ji, ii = np.meshgrid((np.arange(data.shape[1]) - j_cen),
                          (np.arange(data.shape[0]) - i_cen))
-    ri = np.sqrt(ji ** 2 + ii ** 2) * pixscale
+    ri = np.sqrt(ji**2 + ii**2) * pixscale
 
     # Create the low-pass filter
     data_filter = np.zeros(data.shape)
 
     idx = np.where((k_l < ri) & (ri <= k_h))
-    data_filter[idx] = 0.5 * (1 + np.cos(np.pi * (ri[idx] - k_l) / (k_h - k_l)))
+    data_filter[idx] = 0.5 * (1 + np.cos(np.pi * (ri[idx] - k_l) /
+                                         (k_h - k_l)))
 
     data_filter[ri <= k_l] = 1
 
@@ -399,7 +406,7 @@ def trim_kernel_energy(kernel, energy_tol=0.999):
     ji, ii = np.meshgrid((np.arange(kernel.shape[1]) - j_cen),
                          (np.arange(kernel.shape[0]) - i_cen))
 
-    ri = np.sqrt(ji ** 2 + ii ** 2)
+    ri = np.sqrt(ji**2 + ii**2)
 
     total_kernel_energy = np.nansum(np.abs(kernel[ri <= kernel_radius]))
 
@@ -418,93 +425,84 @@ def trim_kernel_energy(kernel, energy_tol=0.999):
 
 class MakeConvolutionKernel:
     """Class to generate kernels following the Aniano 2011 algorithm.
+
+    Args:
+
+        * arg: something
+
+    Attributes:
+
+        * attribute: something
+
     """
 
-    def __init__(self,
-                 source_psf=None,
-                 source_fwhm=None,
-                 source_name=None,
-                 source_pixscale=1,
-                 target_psf=None,
-                 target_fwhm=None,
-                 target_name=None,
-                 target_pixscale=1,
-                 common_pixscale=None,
-                 grid_size_arcsec=None,
-                 verbose=False,
-                 ):
+    def __init__(
+        self,
+        source_psf=None,
+        source_fwhm=None,
+        source_name='source',
+        source_pixscale=1,
+        target_psf=None,
+        target_fwhm=None,
+        target_name='target',
+        target_pixscale=1,
+        common_pixscale=0.2,
+        grid_size_arcsec=None,
+        verbose=False,
+    ):
         """
-        Args:
-            source_psf: Source PSF as ndarray or FITS HDU. Required.
-            source_fwhm: Source FWHM in arcsec. Fitted if not provided.
-            source_name: Label for source PSF. Defaults to 'source'.
-            source_pixscale: Pixel scale in arcsec (used when source_psf is an array).
-            target_psf: Target PSF as ndarray or FITS HDU. Optional -- not needed
-                if only processing the source PSF via process_source_psf().
-            target_fwhm: Target FWHM in arcsec. Fitted if not provided.
-            target_name: Label for target PSF. Defaults to 'target'.
-            target_pixscale: Pixel scale in arcsec (used when target_psf is an array).
-            common_pixscale: Common pixel scale to resample both PSFs onto.
-                Defaults to source_pixscale if not provided.
-            grid_size_arcsec: Grid size in arcsec for the resize step.
-                Defaults to the source PSF's native grid size if not provided.
-            verbose: Print progress messages.
+        test
         """
         if source_psf is None:
-            raise ValueError('source_psf must be provided')
+            raise Warning('original_psf should be defined')
+        if target_psf is None:
+            raise Warning('target_psf should be defined')
 
-        if isinstance(source_psf, (fits.hdu.image.PrimaryHDU, fits.hdu.image.ImageHDU)):
+        if isinstance(source_psf,
+                      (fits.hdu.image.PrimaryHDU, fits.hdu.image.ImageHDU)):
+            # get input PSF from file
             self.source_psf = copy.deepcopy(source_psf.data)
             self.source_pixscale = get_pixscale(source_psf)
         elif isinstance(source_psf, np.ndarray):
             self.source_psf = copy.deepcopy(source_psf)
             self.source_pixscale = source_pixscale
+        # print('source PSF from array')
         else:
-            raise TypeError('source_psf must be an ndarray or FITS HDU')
+            raise Warning('source_psf is in an unknown format')
 
-        self.target_psf = None
-        self.target_pixscale = target_pixscale
-        self.target_fwhm = None
-
-        if target_psf is not None:
-            if isinstance(target_psf, (fits.hdu.image.PrimaryHDU, fits.hdu.image.ImageHDU)):
-                self.target_psf = copy.deepcopy(target_psf.data)
-                self.target_pixscale = get_pixscale(target_psf)
-            elif isinstance(target_psf, np.ndarray):
-                self.target_psf = copy.deepcopy(target_psf)
-                self.target_pixscale = target_pixscale
-            else:
-                raise TypeError('target_psf must be an ndarray or FITS HDU')
-
-            if not target_fwhm:
-                target_fwhm = fit_2d_gaussian(data=self.target_psf, pixscale=self.target_pixscale)
-            self.target_fwhm = copy.deepcopy(target_fwhm)
+        if isinstance(target_psf,
+                      (fits.hdu.image.PrimaryHDU, fits.hdu.image.ImageHDU)):
+            # get input PSF from file
+            self.target_psf = copy.deepcopy(target_psf.data)
+            self.target_pixscale = get_pixscale(target_psf)
+        elif isinstance(target_psf, np.ndarray):
+            self.target_psf = copy.deepcopy(target_psf)
+            self.target_pixscale = target_pixscale
+            #print('target PSF from array')
+        else:
+            raise Warning('target_psf is in an unknown format')
 
         if not source_fwhm:
-            source_fwhm = fit_2d_gaussian(data=self.source_psf, pixscale=self.source_pixscale)
+            #print('source_fwhm not supplied. Fitting using 2D Gaussian')
+            source_fwhm = fit_2d_gaussian(data=self.source_psf,
+                                          pixscale=self.source_pixscale)
+        if not target_fwhm:
+            # print('target_fwhm not supplied. Fitting using 2D Gaussian')
+            target_fwhm = fit_2d_gaussian(data=self.target_psf,
+                                          pixscale=self.target_pixscale)
 
-        if self.target_fwhm is not None and source_fwhm >= self.target_fwhm:
-            raise Warning('Cannot create kernel from lower to higher resolution data!', source_fwhm, self.target_fwhm)
+        if source_fwhm >= target_fwhm:
+            raise Warning(
+                'Cannot create kernel from lower to higher resolution data!',
+                source_fwhm, target_fwhm)
 
         self.source_fwhm = copy.deepcopy(source_fwhm)
+        self.target_fwhm = copy.deepcopy(target_fwhm)
 
-        self.source_name = copy.deepcopy(source_name) if source_name is not None else 'source'
-        self.target_name = copy.deepcopy(target_name) if target_name is not None else 'target'
+        self.source_name = copy.deepcopy(source_name)
+        self.target_name = copy.deepcopy(target_name)
 
-
-        # if common_pixscale is not provided, use the source_pixscale
-        if common_pixscale is None:
-            self.common_pixscale = self.source_pixscale
-        else:
-            self.common_pixscale = copy.deepcopy(common_pixscale)
-        
-        # if grid_size_arcsec is not provided, use grid size of source PSF  
-        if grid_size_arcsec is None:
-            self.grid_size_arcsec = (
-                np.array(self.source_psf.shape, dtype=float) * self.source_pixscale
-            )
-        else:
-            self.grid_size_arcsec = copy.deepcopy(grid_size_arcsec)
+        self.common_pixscale = copy.deepcopy(common_pixscale)
 
         self.source_fourier = None
         self.target_fourier = None
@@ -512,99 +510,73 @@ class MakeConvolutionKernel:
         self.kernel_fourier = None
         self.kernel = None
 
+        self.grid_size_arcsec = grid_size_arcsec
+
         self.verbose = verbose
 
-    def _process_psf(self, psf_data, pixscale, common_pixscale, grid_size_arcsec):
-        """Process a single PSF: interp NaNs, resample, centroid, circularise, resize, normalise."""
-        psf_data = interp_nans(psf_data)
+    def make_convolution_kernel(self):
+        """Short desc
 
-        if not np.isclose(pixscale, common_pixscale):
-            if self.verbose:
-                print('Resampling')
-            psf_data = resample(psf_data, pixscale, common_pixscale)
-            if self.verbose:
-                print(f'  resampled shape: {psf_data.shape}')
-        elif self.verbose:
-            print('Skipping resample (pixscales match)')
+        Long desc
+
+        Returns:
+            * etc
+        """
+
+        if self.verbose:
+            print('Interpolating')
+
+        # Interpolate over any NaNs in the PSFs
+        self.source_psf = interp_nans(self.source_psf)
+        self.target_psf = interp_nans(self.target_psf)
+
+        if self.verbose:
+            print('Resampling')
+
+        # Put onto common pixel grid
+        self.source_psf = resample(self.source_psf, self.source_pixscale,
+                                   self.common_pixscale)
+        self.target_psf = resample(self.target_psf, self.target_pixscale,
+                                   self.common_pixscale)
+
+        if self.verbose:
+            print('common pixel grid', self.source_psf.shape)
+        # plt.figure()
+        # plt.imshow(self.source_psf, vmin=vmin, vmax=vmax)
 
         if self.verbose:
             print('Centroiding')
-        psf_data = centroid(psf_data)
+
+        # Centroid
+        self.source_psf = centroid(self.source_psf)
+        self.target_psf = centroid(self.target_psf)
+
+        if self.verbose:
+            print('common pixel grid', self.source_psf.shape)
 
         if self.verbose:
             print('Circularising')
-        psf_data = circularise(psf_data)
+
+        # Circularise
+        self.source_psf = circularise(self.source_psf)
+        self.target_psf = circularise(self.target_psf)
 
         if self.verbose:
             print('Resizing')
-            if grid_size_arcsec is not None:
-                print('  grid in pixels', grid_size_arcsec / common_pixscale)
-        psf_data = resize(psf_data, common_pixscale, grid_size_arcsec=grid_size_arcsec)
+            print('grid in pixels',
+                  self.grid_size_arcsec / self.common_pixscale)
 
-        psf_data /= np.nansum(psf_data)
+        # Resize
+        self.source_psf = resize(self.source_psf,
+                                 self.common_pixscale,
+                                 grid_size_arcsec=self.grid_size_arcsec)
+        self.target_psf = resize(self.target_psf,
+                                 self.common_pixscale,
+                                 grid_size_arcsec=self.grid_size_arcsec)
 
-        if self.verbose:
-            print(f'  final shape: {psf_data.shape}')
-
-        return psf_data
-
-    def process_source_psf(self):
-        """Process the source PSF and apply Fourier-domain filtering.
-
-        Applies the full Aniano pipeline to the source PSF: interp NaNs,
-        resample, centroid, circularise, resize, normalise, then FFT ->
-        circularise -> high-pass filter -> IFFT.
-
-        If common_pixscale is None, defaults to source_pixscale (no resample).
-        If grid_size_arcsec is None, defaults to the source PSF's native grid
-        size so that no resize is needed either.
-
-        After calling, the processed source PSF is available via
-        self.source_psf and can be saved with save_processed_psf().
-        """
-        if self.verbose:
-            print(f'Processing source PSF ({self.source_name})')
-
-        self.source_psf = self._process_psf(
-            self.source_psf, self.source_pixscale,
-            self.common_pixscale, self.grid_size_arcsec,
-        )
-
-        if self.verbose:
-            print('Fourier-domain filtering')
-
-        source_fourier = np.real(np.fft.fft2(np.fft.ifftshift(self.source_psf)))
-        source_fourier = np.fft.fftshift(source_fourier)
-        source_fourier = circularise(source_fourier)
-        source_fourier = high_pass_filter(
-            source_fourier, self.source_fwhm, self.common_pixscale / 2,
-        )
-        self.source_psf = np.fft.fftshift(
-            np.real(np.fft.ifft2(np.fft.ifftshift(source_fourier)))
-        )
-        self.source_psf[np.abs(self.source_psf) <= np.finfo(float).eps] = 0
+        # Normalise
         self.source_psf /= np.nansum(self.source_psf)
-
-    def make_convolution_kernel(self):
-        """Generate a convolution kernel from source to target PSF using the Aniano algorithm.
-
-        Requires that target_psf was provided at init time and that
-        common_pixscale is set explicitly.
-        """
-        if self.target_psf is None:
-            raise ValueError('target_psf is required for make_convolution_kernel. '
-                             'Use process_source_psf() to process the source PSF alone.')
-        if self.verbose:
-            print('Processing source and target PSFs')
-
-        self.source_psf = self._process_psf(
-            self.source_psf, self.source_pixscale,
-            self.common_pixscale, self.grid_size_arcsec,
-        )
-        self.target_psf = self._process_psf(
-            self.target_psf, self.target_pixscale,
-            self.common_pixscale, self.grid_size_arcsec,
-        )
+        self.target_psf /= np.nansum(self.target_psf)
 
         if self.verbose:
             print('common pixel grid', self.source_psf.shape)
@@ -614,8 +586,10 @@ class MakeConvolutionKernel:
 
         # We now move onto the FFT part. Fourier transform the PSFs - only take the real part
 
-        self.source_fourier = np.real(np.fft.fft2(np.fft.ifftshift(self.source_psf)))
-        self.target_fourier = np.real(np.fft.fft2(np.fft.ifftshift(self.target_psf)))
+        self.source_fourier = np.real(
+            np.fft.fft2(np.fft.ifftshift(self.source_psf)))
+        self.target_fourier = np.real(
+            np.fft.fft2(np.fft.ifftshift(self.target_psf)))
 
         # Make sure centre of FFT is in middle
 
@@ -633,8 +607,20 @@ class MakeConvolutionKernel:
             print('High-pass filter')
 
         # High-pass filter
-        source_fourier_high_pass = high_pass_filter(self.source_fourier, self.source_fwhm, self.common_pixscale / 2)
-        target_fourier_high_pass = high_pass_filter(self.target_fourier, self.target_fwhm, self.common_pixscale / 2)
+        source_fourier_high_pass = high_pass_filter(self.source_fourier,
+                                                    self.source_fwhm,
+                                                    self.common_pixscale / 2)
+        target_fourier_high_pass = high_pass_filter(self.target_fourier,
+                                                    self.target_fwhm,
+                                                    self.common_pixscale / 2)
+
+        # IFFT the filtered source back to spatial domain and store for comparison
+        _src = np.fft.fftshift(
+            np.real(np.fft.ifft2(np.fft.ifftshift(source_fourier_high_pass)))
+        )
+        _src[np.abs(_src) <= np.finfo(float).eps] = 0
+        _src /= np.nansum(_src)
+        self.source_psf_processed = _src
 
         if self.verbose:
             print('Inverting')
@@ -642,7 +628,7 @@ class MakeConvolutionKernel:
         # Invert the source fourier, any infs go to 0
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            source_fourier_invert = source_fourier_high_pass ** -1
+            source_fourier_invert = source_fourier_high_pass**-1
             inf_idx = np.where(~np.isfinite(source_fourier_invert))
             source_fourier_invert[inf_idx] = 0
 
@@ -650,20 +636,23 @@ class MakeConvolutionKernel:
             print('Low-pass filter')
 
         # Low-pass filter
-        source_fourier_low_pass = low_pass_filter(self.source_fourier, self.common_pixscale / 2)
+        source_fourier_low_pass = low_pass_filter(self.source_fourier,
+                                                  self.common_pixscale / 2)
 
         if self.verbose:
             print('Creating kernel')
 
         # FFT of convolution kernel
-        self.kernel_fourier = target_fourier_high_pass * (source_fourier_low_pass * source_fourier_invert)
+        self.kernel_fourier = target_fourier_high_pass * (
+            source_fourier_low_pass * source_fourier_invert)
         self.kernel_fourier = np.fft.ifftshift(self.kernel_fourier)
 
         if self.verbose:
             print('IFFT-ing')
 
         # IFFT to kernel and round out any tiny computational errors
-        self.kernel = np.fft.fftshift(np.real(np.fft.ifft2(self.kernel_fourier)))
+        self.kernel = np.fft.fftshift(
+            np.real(np.fft.ifft2(self.kernel_fourier)))
         self.kernel[np.abs(self.kernel) <= np.finfo(float).eps] = 0
 
         if self.verbose:
@@ -686,62 +675,24 @@ class MakeConvolutionKernel:
         self.kernel = circularise(self.kernel)
         self.kernel /= np.nanmax(self.kernel)
 
-    def save_processed_psf(self, outdir, which='source'):
-        """Save a processed PSF to a FITS file.
-
-        Args:
-            outdir (str): Output directory.
-            which (str): Which PSF to save. One of 'source', 'target', or 'both'.
-                Defaults to 'source'.
-
-        Returns:
-            list[str]: Paths to the saved FITS files.
-        """
-        if which not in ('source', 'target', 'both'):
-            raise ValueError(f"which must be 'source', 'target', or 'both', got '{which}'")
-
-        os.makedirs(outdir, exist_ok=True)
-        saved = []
-
-        psfs_to_save = []
-        if which in ('source', 'both'):
-            psfs_to_save.append((self.source_psf, self.source_name))
-        if which in ('target', 'both'):
-            psfs_to_save.append((self.target_psf, self.target_name))
-
-        for psf_data, name in psfs_to_save:
-            if psf_data is None:
-                raise ValueError(f"No PSF data for '{name}'. Process the PSF first.")
-
-            hdu = fits.PrimaryHDU(data=np.array(psf_data, dtype=np.float32))
-            hdu.header['PSFNAME'] = (name, 'PSF identifier')
-            hdu.header['PIXELSCL'] = (self.common_pixscale, 'arcsec/pixel on common grid')
-            hdu.header['CRPIX1'] = (psf_data.shape[1] + 1) / 2
-            hdu.header['CRPIX2'] = (psf_data.shape[0] + 1) / 2
-            hdu.header['CRVAL1'] = 0.0
-            hdu.header['CRVAL2'] = 0.0
-            hdu.header['CDELT1'] = -self.common_pixscale / 3600
-            hdu.header['CDELT2'] = self.common_pixscale / 3600
-
-            file_name = os.path.join(outdir, f'{name}_processed_psf.fits')
-            hdu.writeto(file_name, overwrite=True)
-            saved.append(file_name)
-
-        return saved
-
-    def write_out_kernel(self, outdir=None, add_keys=None, naming_convention='PHANGS'):
+    def write_out_kernel(self,
+                         outdir=None,
+                         add_keys=None,
+                         naming_convention='PHANGS'):
         """
 
         Returns:
 
         """
-        if naming_convention=='PHANGS':
+        if naming_convention == 'PHANGS':
             target_name = self.target_name.replace('.', 'p')
             target_name = target_name.lower()
             source_name = self.source_name.lower()
-            file_name = os.path.join( outdir, '%s_to_%s.fits' % (source_name, target_name))
+            file_name = os.path.join(
+                outdir, '%s_to_%s.fits' % (source_name, target_name))
         else:
-            file_name = os.path.join( outdir, '%s_to_%s.fits' % (self.source_name, self.target_name))
+            file_name = os.path.join(
+                outdir, '%s_to_%s.fits' % (self.source_name, self.target_name))
 
         # Build the fits file. Use 32bit precision to cut down space
 
@@ -755,14 +706,14 @@ class MakeConvolutionKernel:
         hdu.header['CRVAL1'] = 0.00
         hdu.header['CRVAL2'] = 0.00
 
-        hdu.header['CDELT1'] = - self.common_pixscale / 3600
+        hdu.header['CDELT1'] = -self.common_pixscale / 3600
         hdu.header['CDELT2'] = self.common_pixscale / 3600
 
         hdu.header['CTYPE1'] = 'RA---TAN'
         hdu.header['CTYPE2'] = 'DEC--TAN'
 
-        if (add_keys is not None) & (type(add_keys)==dict):
-            for key in  add_keys:
+        if (add_keys is not None) & (type(add_keys) == dict):
+            for key in add_keys:
                 hdu.header[key] = add_keys[key]
 
         hdu.writeto(file_name, overwrite=True)
