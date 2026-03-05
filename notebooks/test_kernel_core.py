@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Verify MakeConvolutionKernel works without target PSF and can save processed PSFs.
 
-Also compares the new process_source_psf output against the original
-make_convolution_kernel pipeline to confirm parity.
+Uses F335M and F770W as test cases.
+
+Also compares the processed source PSF output with  
 """
 
 from pathlib import Path
@@ -12,7 +13,7 @@ import matplotlib.pyplot as pl
 from astropy.io import fits
 
 from jwst_kernels.kernel_core import MakeConvolutionKernel
-from jwst_kernels.kernel_core_original import (
+from kernel_core_original import (
     MakeConvolutionKernel as MakeConvolutionKernelOriginal,
 )
 from jwst_kernels.make_psf import read_PSF, save_nircam_PSF, save_miri_PSF
@@ -44,24 +45,23 @@ def main():
     print(f"\nSource PSF shape: {source_data.shape}, pixscale: {source_pix}")
     print(f"Target PSF shape: {target_data.shape}, pixscale: {target_pix}")
 
-    # ---- Test 1: process source PSF with defaults (no common_pixscale, no grid_size) ----
-    print("\n--- Test 1: process_source_psf with defaults ---")
-    kc1 = MakeConvolutionKernel(
+    print("\n--- Test 1: process_source_psf with default options ---")
+    ck1 = MakeConvolutionKernel(
         source_psf=source_data,
         source_pixscale=source_pix,
         source_name='F335M',
         verbose=True,
     )
-    kc1.process_source_psf()
-    print(f"Processed source shape: {kc1.source_psf.shape}")
-    print(f"Resolved common_pixscale: {kc1.common_pixscale}")
-    print(f"Resolved grid_size_arcsec: {kc1.grid_size_arcsec}")
-    assert kc1.target_psf is None, "target_psf should be None"
-    assert np.isclose(kc1.common_pixscale, source_pix), (
+    ck1.process_source_psf()
+    print(f"Processed source shape: {ck1.source_psf.shape}")
+    print(f"Resolved common_pixscale: {ck1.common_pixscale}")
+    print(f"Resolved grid_size_arcsec: {ck1.grid_size_arcsec}")
+    assert ck1.target_psf is None, "target_psf should be None"
+    assert np.isclose(ck1.common_pixscale, source_pix), (
         "common_pixscale should default to source_pixscale"
     )
 
-    saved = kc1.save_processed_psf(str(OUT_DIR), which='source')
+    saved = ck1.save_processed_psf(str(OUT_DIR), which='source')
     hdu = fits.open(saved[0])
     h = hdu[0].header
     print(f"  Saved: {saved[0]}")
@@ -157,10 +157,10 @@ def main():
     fig, axes = pl.subplots(2, 3, figsize=(15, 9))
 
     im0 = axes[0, 0].imshow(
-        np.log10(kc1.source_psf / kc1.source_psf.max() + 1e-8),
+        np.log10(ck1.source_psf / ck1.source_psf.max() + 1e-8),
         origin="lower", cmap="inferno", vmin=-5, vmax=0,
     )
-    axes[0, 0].set_title(f"F335M source (native grid)\n{kc1.source_psf.shape}")
+    axes[0, 0].set_title(f"F335M source (native grid)\n{ck1.source_psf.shape}")
     pl.colorbar(im0, ax=axes[0, 0])
 
     im1 = axes[0, 1].imshow(
