@@ -492,19 +492,8 @@ class MakeConvolutionKernel:
         self.target_name = copy.deepcopy(target_name) if target_name is not None else 'target'
 
 
-        # if common_pixscale is not provided, use the source_pixscale
-        if common_pixscale is None:
-            self.common_pixscale = self.source_pixscale
-        else:
-            self.common_pixscale = copy.deepcopy(common_pixscale)
-        
-        # if grid_size_arcsec is not provided, use grid size of source PSF  
-        if grid_size_arcsec is None:
-            self.grid_size_arcsec = (
-                np.array(self.source_psf.shape, dtype=float) * self.source_pixscale
-            )
-        else:
-            self.grid_size_arcsec = copy.deepcopy(grid_size_arcsec)
+        self.common_pixscale = copy.deepcopy(common_pixscale)
+        self.grid_size_arcsec = copy.deepcopy(grid_size_arcsec) if grid_size_arcsec is not None else None
 
         self.source_fourier = None
         self.target_fourier = None
@@ -512,10 +501,14 @@ class MakeConvolutionKernel:
         self.kernel_fourier = None
         self.kernel = None
 
+        # Flags to track if PSFs have been processed (in case process_source_psf or make_convolution_kernel are called multiple times)
+        self._source_processed = False
+        self._target_processed = False
+
         self.verbose = verbose
 
     def _process_psf(self, psf_data, pixscale, common_pixscale, grid_size_arcsec):
-        """Process a single PSF: interp NaNs, resample, centroid, circularise, resize, normalise."""
+        """Spatially process a single PSF: interp NaNs, resample, centroid, circularise, resize, normalise."""
         psf_data = interp_nans(psf_data)
 
         if not np.isclose(pixscale, common_pixscale):
@@ -549,9 +542,9 @@ class MakeConvolutionKernel:
         return psf_data
 
     def process_source_psf(self):
-        """Process the source PSF and apply Fourier-domain filtering.
+        """Spatially process the source PSF and apply Fourier-domain filtering.
 
-        Applies the full Aniano pipeline to the source PSF: interp NaNs,
+        Applies the Aniano 2011 algorithm to the source PSF: interp NaNs,
         resample, centroid, circularise, resize, normalise, then FFT ->
         circularise -> high-pass filter -> IFFT.
 
@@ -561,7 +554,19 @@ class MakeConvolutionKernel:
 
         After calling, the processed source PSF is available via
         self.source_psf and can be saved with save_processed_psf().
+
         """
+        if self._source_processed:
+            raise RuntimeError('Source PSF has already been processed. '
+                               'Create a new MakeConvolutionKernel instance to reprocess.')
+
+        if self.common_pixscale is None:
+            self.common_pixscale = self.source_pixscale
+        if self.grid_size_arcsec is None:
+            self.grid_size_arcsec = (
+                np.array(self.source_psf.shape, dtype=float) * self.source_pixscale
+            )
+
         if self.verbose:
             print(f'Processing source PSF ({self.source_name})')
 
@@ -584,16 +589,26 @@ class MakeConvolutionKernel:
         )
         self.source_psf[np.abs(self.source_psf) <= np.finfo(float).eps] = 0
         self.source_psf /= np.nansum(self.source_psf)
+        self._source_processed = True
 
     def make_convolution_kernel(self):
         """Generate a convolution kernel from source to target PSF using the Aniano algorithm.
 
-        Requires that target_psf was provided at init time and that
-        common_pixscale is set explicitly.
+        Requires that target_psf was provided at init time.
+
+        If common_pixscale is None, defaults to source_pixscale.
+        If grid_size_arcsec is None, resize() defaults to [729, 729] arcsec.
         """
         if self.target_psf is None:
             raise ValueError('target_psf is required for make_convolution_kernel. '
                              'Use process_source_psf() to process the source PSF alone.')
+        if self._source_processed or self._target_processed:
+            raise RuntimeError('PSFs have already been processed. '
+                               'Create a new MakeConvolutionKernel instance to reprocess.')
+
+        if self.common_pixscale is None:
+            self.common_pixscale = self.source_pixscale
+
         if self.verbose:
             print('Processing source and target PSFs')
 
@@ -605,6 +620,8 @@ class MakeConvolutionKernel:
             self.target_psf, self.target_pixscale,
             self.common_pixscale, self.grid_size_arcsec,
         )
+        self._source_processed = True
+        self._target_processed = True
 
         if self.verbose:
             print('common pixel grid', self.source_psf.shape)
@@ -715,7 +732,7 @@ class MakeConvolutionKernel:
 
             hdu = fits.PrimaryHDU(data=np.array(psf_data, dtype=np.float32))
             hdu.header['PSFNAME'] = (name, 'PSF identifier')
-            hdu.header['PIXELSCL'] = (self.common_pixscale, 'arcsec/pixel on common grid')
+            hdu.header['PIXELSCL'] = (self.common_pixscale, 'arcsec/pixel')
             hdu.header['CRPIX1'] = (psf_data.shape[1] + 1) / 2
             hdu.header['CRPIX2'] = (psf_data.shape[0] + 1) / 2
             hdu.header['CRVAL1'] = 0.0
