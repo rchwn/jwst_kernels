@@ -42,8 +42,16 @@ def save_miri_PSF(miri_psfs, output_dir=None, **kwargs):
         print(output_dir)
 
     oversample_factor = kwargs.pop("oversample_factor", 5)
-    detector_oversample = kwargs.pop("oversample_factor", 5)
+    detector_oversample = kwargs.pop("detector_oversample", oversample_factor)
     fov_arcsec = kwargs.pop("fov_arcsec", 19.98)
+
+    if detector_oversample % 2 == 0:
+        import warnings
+        warnings.warn(
+            f"detector_oversample={detector_oversample} is even; "
+            "OVERDIST extension will have even dimensions despite parity='odd'",
+            stacklevel=2,
+        )
   
     for filter1 in miri_psfs:
         print('building PSF '+filter1)
@@ -77,8 +85,16 @@ def save_nircam_PSF(nircam_psfs, output_dir=None, **kwargs):
         print('output dir not specified, using current directory')
 
     oversample_factor = kwargs.pop("oversample_factor", 5)
-    detector_oversample = kwargs.pop("oversample_factor", 5)
+    detector_oversample = kwargs.pop("detector_oversample", oversample_factor)
     fov_arcsec = kwargs.pop("fov_arcsec", 10)
+
+    if detector_oversample % 2 == 0:
+        import warnings
+        warnings.warn(
+            f"detector_oversample={detector_oversample} is even; "
+            "OVERDIST extension will have even dimensions despite parity='odd'",
+            stacklevel=2,
+        )
     
     for filter1 in nircam_psfs:
         print('building PSF '+filter1)
@@ -94,7 +110,7 @@ def save_nircam_PSF(nircam_psfs, output_dir=None, **kwargs):
         psf_array.writeto(os.path.join(output_dir, 'NIRCam_PSF_filter_'+nircam.filter+'.fits'), 
                           overwrite=True)
 
-def read_PSF(input_filter, detector_effects=True, psf_dir=None):
+def read_PSF(input_filter, detector_effects=True, psf_dir=None, **kwargs):
     if psf_dir is None:
         psf_dir = path.abspath('.')
 
@@ -113,11 +129,11 @@ def read_PSF(input_filter, detector_effects=True, psf_dir=None):
         print('no PSF for '+input_filter['camera']+ ' '+ input_filter['filter']+' in current directory')
         print('generating PSF with webbpsf!')
         if input_filter['camera']=='MIRI':
-            save_miri_PSF([input_filter['filter']], output_dir=psf_dir)
+            save_miri_PSF([input_filter['filter']], output_dir=psf_dir, **kwargs)
             source_psf = fits.open(source_psf_path)
             
         if input_filter['camera']=='NIRCam':
-            save_nircam_PSF([input_filter['filter']], output_dir=psf_dir)
+            save_nircam_PSF([input_filter['filter']], output_dir=psf_dir, **kwargs)
             source_psf = fits.open(source_psf_path)
             
     source_psf=source_psf[extension]

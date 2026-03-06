@@ -517,8 +517,14 @@ class MakeConvolutionKernel:
             psf_data = resample(psf_data, pixscale, common_pixscale)
             if self.verbose:
                 print(f'  resampled shape: {psf_data.shape}')
-        elif self.verbose:
-            print('Skipping resample (pixscales match)')
+        else:
+            if self.verbose:
+                print('Skipping resample (pixscales match)')
+            # resample() forces odd dimensions; do the same when skipping
+            if psf_data.shape[0] % 2 == 0:
+                psf_data = psf_data[:psf_data.shape[0] - 1, :]
+            if psf_data.shape[1] % 2 == 0:
+                psf_data = psf_data[:, :psf_data.shape[1] - 1]
 
         if self.verbose:
             print('Centroiding')
@@ -703,7 +709,7 @@ class MakeConvolutionKernel:
         self.kernel = circularise(self.kernel)
         self.kernel /= np.nanmax(self.kernel)
 
-    def save_processed_psf(self, outdir, which='source'):
+    def save_processed_psf(self, outdir, which='source', filename_suffix='aniano_processed'):
         """Save a processed PSF to a FITS file.
 
         Args:
@@ -740,7 +746,7 @@ class MakeConvolutionKernel:
             hdu.header['CDELT1'] = -self.common_pixscale / 3600
             hdu.header['CDELT2'] = self.common_pixscale / 3600
 
-            file_name = os.path.join(outdir, f'{name}_processed_psf.fits')
+            file_name = os.path.join(outdir, f'{name}_{filename_suffix}.fits')
             hdu.writeto(file_name, overwrite=True)
             saved.append(file_name)
 
