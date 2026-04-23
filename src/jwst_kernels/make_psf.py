@@ -17,9 +17,9 @@ import os
 import stpsf as webbpsf
 
 
-def makeGaussian_2D(X, M, S, normalise=False):
+def makeGaussian_2D(X, M, S, normalize=False):
     gauss = np.exp(-np.power((X[0] - M[0])/S[0], 2.)/2)*np.exp(-np.power((X[1] - M[1])/S[1], 2.)/2)
-    if normalise==True: gauss =gauss *1./(2.*np.pi*S[0]*S[1])
+    if normalize==True: gauss =gauss *1./(2.*np.pi*S[0]*S[1])
     return gauss
 
 

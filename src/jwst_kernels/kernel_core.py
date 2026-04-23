@@ -89,10 +89,10 @@ def fit_2d_gaussian(data, pixscale=None):
 
     """
 
-    # Normalise to peak of 1
+    # Normalize to peak of 1
     data /= np.nanmax(data)
 
-    # Use centre of image for first guess centre, meshgrid up to feed into modelling
+    # Use center of image for first guess center, meshgrid up to feed into modelling
     i_cen = (data.shape[0] - 1) / 2
     j_cen = (data.shape[1] - 1) / 2
 
@@ -146,7 +146,7 @@ def centroid(data):
 
     j_centroid, i_centroid = centroid_com(data)
 
-    # Shift the PSF to centre it
+    # Shift the PSF to center it
 
     i_shift = int(np.round(i_cen - i_centroid))
     j_shift = int(np.round(j_cen - j_centroid))
@@ -174,8 +174,8 @@ def resample(data, source_pixscale, target_pixscale, interp_order=3):
     return data_resample
 
 
-def circularise(data, rotations=14):
-    """Circularise a PSF.
+def circularize(data, rotations=14):
+    """Circularize a PSF.
 
     Rotate the PSF a number of times, taking an iterative average each time. This serves to make the PSF rotationally
     invariant.
@@ -507,8 +507,12 @@ class MakeConvolutionKernel:
 
         self.verbose = verbose
 
-    def _process_psf(self, psf_data, pixscale, common_pixscale, grid_size_arcsec):
-        """Spatially process a single PSF: interp NaNs, resample, centroid, circularise, resize, normalise."""
+    def _process_psf(self, psf_data, pixscale, common_pixscale, grid_size_arcsec,
+                     do_circularize=True):
+        """Spatially process a single PSF: interp NaNs, resample, centroid, circularize, resize, normalize.
+
+        If ``do_circularize`` is False, the real-space rotate-and-average step is skipped.
+        """
         psf_data = interp_nans(psf_data)
 
         if not np.isclose(pixscale, common_pixscale):
@@ -530,9 +534,12 @@ class MakeConvolutionKernel:
             print('Centroiding')
         psf_data = centroid(psf_data)
 
-        if self.verbose:
-            print('Circularising')
-        psf_data = circularise(psf_data)
+        if do_circularize:
+            if self.verbose:
+                print('Circularizing')
+            psf_data = circularize(psf_data)
+        elif self.verbose:
+            print('Skipping real-space circularize (do_circularize=False)')
 
         if self.verbose:
             print('Resizing')
@@ -547,12 +554,25 @@ class MakeConvolutionKernel:
 
         return psf_data
 
-    def process_source_psf(self):
-        """Spatially process the source PSF and apply Fourier-domain filtering.
+    def process_source_psf(self, do_circularize=True, do_fourier_filter=True):
+        """Spatially process the source PSF and optionally apply Fourier-domain filtering.
 
         Applies the Aniano 2011 algorithm to the source PSF: interp NaNs,
-        resample, centroid, circularise, resize, normalise, then FFT ->
-        circularise -> high-pass filter -> IFFT.
+        resample, centroid, circularize, resize, normalize, then (optionally)
+        FFT -> circularize -> high-pass filter -> IFFT.
+
+        Args:
+            do_circularize: If True (default), apply the real-space rotate-and-average
+                step during spatial processing. If False, skip it.
+            do_fourier_filter: If True (default), apply the Fourier-domain
+                circularize + high-pass filter block. If False, return after
+                spatial processing only.
+
+        Variants:
+            * ``do_circularize=True,  do_fourier_filter=True``  -> full Aniano processing.
+            * ``do_circularize=True,  do_fourier_filter=False`` -> real-space circularized only.
+            * ``do_circularize=False, do_fourier_filter=True``  -> Fourier-filtered without
+              real-space circularization.
 
         If common_pixscale is None, defaults to source_pixscale (no resample).
         If grid_size_arcsec is None, defaults to the source PSF's native grid
@@ -562,6 +582,12 @@ class MakeConvolutionKernel:
         self.source_psf and can be saved with save_processed_psf().
 
         """
+        if not do_circularize and not do_fourier_filter:
+            raise ValueError(
+                'process_source_psf requires do_circularize or do_fourier_filter to be True; '
+                'at least one of the Aniano steps must be applied.'
+            )
+
         if self._source_processed:
             raise RuntimeError('Source PSF has already been processed. '
                                'Create a new MakeConvolutionKernel instance to reprocess.')
@@ -579,22 +605,27 @@ class MakeConvolutionKernel:
         self.source_psf = self._process_psf(
             self.source_psf, self.source_pixscale,
             self.common_pixscale, self.grid_size_arcsec,
+            do_circularize=do_circularize,
         )
 
-        if self.verbose:
-            print('Fourier-domain filtering')
+        if do_fourier_filter:
+            if self.verbose:
+                print('Fourier-domain filtering')
 
-        source_fourier = np.real(np.fft.fft2(np.fft.ifftshift(self.source_psf)))
-        source_fourier = np.fft.fftshift(source_fourier)
-        source_fourier = circularise(source_fourier)
-        source_fourier = high_pass_filter(
-            source_fourier, self.source_fwhm, self.common_pixscale / 2,
-        )
-        self.source_psf = np.fft.fftshift(
-            np.real(np.fft.ifft2(np.fft.ifftshift(source_fourier)))
-        )
-        self.source_psf[np.abs(self.source_psf) <= np.finfo(float).eps] = 0
-        self.source_psf /= np.nansum(self.source_psf)
+            source_fourier = np.real(np.fft.fft2(np.fft.ifftshift(self.source_psf)))
+            source_fourier = np.fft.fftshift(source_fourier)
+            source_fourier = circularize(source_fourier)
+            source_fourier = high_pass_filter(
+                source_fourier, self.source_fwhm, self.common_pixscale / 2,
+            )
+            self.source_psf = np.fft.fftshift(
+                np.real(np.fft.ifft2(np.fft.ifftshift(source_fourier)))
+            )
+            self.source_psf[np.abs(self.source_psf) <= np.finfo(float).eps] = 0
+            self.source_psf /= np.nansum(self.source_psf)
+        elif self.verbose:
+            print('Skipping Fourier-domain filtering (do_fourier_filter=False)')
+
         self._source_processed = True
 
     def make_convolution_kernel(self):
@@ -640,17 +671,17 @@ class MakeConvolutionKernel:
         self.source_fourier = np.real(np.fft.fft2(np.fft.ifftshift(self.source_psf)))
         self.target_fourier = np.real(np.fft.fft2(np.fft.ifftshift(self.target_psf)))
 
-        # Make sure centre of FFT is in middle
+        # Make sure center of FFT is in middle
 
         self.source_fourier = np.fft.fftshift(self.source_fourier)
         self.target_fourier = np.fft.fftshift(self.target_fourier)
 
         if self.verbose:
-            print('Circularising')
+            print('Circularizing')
 
-        # Circularise
-        self.source_fourier = circularise(self.source_fourier)
-        self.target_fourier = circularise(self.target_fourier)
+        # Circularize
+        self.source_fourier = circularize(self.source_fourier)
+        self.target_fourier = circularize(self.target_fourier)
 
         if self.verbose:
             print('High-pass filter')
@@ -705,8 +736,8 @@ class MakeConvolutionKernel:
         if self.verbose:
             print('Last little bits')
 
-        # Finally, circularise kernel and normalise to peak of 1
-        self.kernel = circularise(self.kernel)
+        # Finally, circularize kernel and normalize to peak of 1
+        self.kernel = circularize(self.kernel)
         self.kernel /= np.nanmax(self.kernel)
 
     def save_processed_psf(self, outdir, which='source', filename_suffix='aniano_processed'):
