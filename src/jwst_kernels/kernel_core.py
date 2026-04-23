@@ -558,8 +558,9 @@ class MakeConvolutionKernel:
         """Spatially process the source PSF and optionally apply Fourier-domain filtering.
 
         Applies the Aniano 2011 algorithm to the source PSF: interp NaNs,
-        resample, centroid, circularize, resize, normalize, then (optionally)
-        FFT -> circularize -> high-pass filter -> IFFT.
+        resample, centroid, (optionally) real-space circularize, resize,
+        normalize, then (optionally) FFT -> circularize -> high-pass
+        filter -> IFFT.
 
         Args:
             do_circularize: If True (default), apply the real-space rotate-and-average
@@ -573,6 +574,11 @@ class MakeConvolutionKernel:
             * ``do_circularize=True,  do_fourier_filter=False`` -> real-space circularized only.
             * ``do_circularize=False, do_fourier_filter=True``  -> Fourier-filtered without
               real-space circularization.
+            * ``do_circularize=False, do_fourier_filter=False`` -> spatial processing only
+              (interp NaNs, resample, centroid, resize, normalize). Neither the real-space
+              rotate-and-average circularize nor the Fourier-domain circularize + high-pass
+              filter block is applied. Useful for diagnostics where you want the asymmetric,
+              unfiltered PSF on the common pixel grid.
 
         If common_pixscale is None, defaults to source_pixscale (no resample).
         If grid_size_arcsec is None, defaults to the source PSF's native grid
@@ -582,12 +588,6 @@ class MakeConvolutionKernel:
         self.source_psf and can be saved with save_processed_psf().
 
         """
-        if not do_circularize and not do_fourier_filter:
-            raise ValueError(
-                'process_source_psf requires do_circularize or do_fourier_filter to be True; '
-                'at least one of the Aniano steps must be applied.'
-            )
-
         if self._source_processed:
             raise RuntimeError('Source PSF has already been processed. '
                                'Create a new MakeConvolutionKernel instance to reprocess.')

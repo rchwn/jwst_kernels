@@ -10,11 +10,13 @@ Features
 - Batch generation of cross kernels
 - Single kernel generation
 - Single Gaussian kernel generation
-- Aniano-processed PSF generation (--just-processed-psf) with three variants:
-    circ_filt   (real-space circularize + Fourier high-pass filter; default)
-    circ_nofilt (real-space circularize only; no Fourier filter)
-    nocirc_filt (Fourier filter only; no real-space circularize)
-  Select with --psf-variants circ_filt,circ_nofilt,nocirc_filt
+- Aniano-processed PSF generation (--just-processed-psf) with four variants:
+    circ_filt     (real-space circularize + Fourier high-pass filter; default)
+    circ_nofilt   (real-space circularize only; no Fourier filter)
+    nocirc_filt   (Fourier filter only; no real-space circularize)
+    nocirc_nofilt (neither circularize nor filter; spatial processing only:
+                   interp NaNs, resample, centroid, resize, normalize)
+  Select with --psf-variants circ_filt,circ_nofilt,nocirc_filt,nocirc_nofilt
 - Parallel processing with multiprocessing
 
 Requirements
@@ -49,18 +51,40 @@ the explicit ``--psf-dir`` / ``--kernel-dir`` flags override the config.
 
 Batch Processing Usage
 ----------------------
-Process predefined sets of kernels in parallel:
+Process predefined sets of matching kernels in parallel. In batch mode
+(without ``--just-processed-psf``) this script produces PSF matching
+kernels only; it does NOT produce Aniano-processed source PSFs (use
+``--just-processed-psf`` for that, see below).
 
-    # Process all MIRI bands to Gaussian kernels (4", 7.5", 15")
+Cross kernels are only generated in the physically meaningful direction:
+from shorter wavelength (sharper PSF) to longer wavelength (broader PSF).
+Long -> short wavelength cross kernels are never attempted because you
+cannot sharpen a PSF by convolution. Concretely:
+
+    - ``miri``   : MIRI_BANDS[i] -> MIRI_BANDS[j] for all j > i
+    - ``nircam`` : NIRCAM_BANDS[i] -> NIRCAM_BANDS[j] for all j > i
+    - ``cross``  : NIRCAM_BANDS[i] -> MIRI_BANDS[j] for all i, j
+                   (all NIRCam bands are shorter than all MIRI bands)
+
+where MIRI_BANDS and NIRCAM_BANDS are the lists of MIRI and NIRCam bands listed near 
+the beginning of the script.
+
+Examples:
+
+    # Process all MIRI bands to Gaussian kernels (0.35", 0.9", 4", 7.5", 15")
+    # PLUS all MIRI -> MIRI (short -> long) cross kernels
     python -m jwst_kernels.make_kernels miri --config config.toml -j 8
 
     # Process all NIRCam bands to Gaussian kernels
+    # PLUS all NIRCam -> NIRCam (short -> long) cross kernels
     python -m jwst_kernels.make_kernels nircam --config config.toml -j 8
 
-    # Process NIRCam to F770W cross kernels
+    # Process NIRCam -> MIRI cross kernels only
     python -m jwst_kernels.make_kernels cross --config config.toml -j 8
 
-    # Process everything
+    # Process everything: miri + nircam + cross (Gaussian + cross kernels).
+    # Does NOT generate Aniano-processed PSFs unless --just-processed-psf is
+    # also passed.
     python -m jwst_kernels.make_kernels all --config config.toml -j 8 --overwrite
 
     # Same, but with paths on the CLI instead of a config file
@@ -93,10 +117,10 @@ Generate Aniano-processed source PSFs (no kernel):
     python -m jwst_kernels.make_kernels --from F770W --just-processed-psf -o \
         --config config.toml
 
-    # Single band, all three variants in one shot
+    # Single band, all four variants in one shot
     python -m jwst_kernels.make_kernels --from F335M --just-processed-psf \
         --config config.toml \
-        --psf-variants circ_filt,circ_nofilt,nocirc_filt
+        --psf-variants circ_filt,circ_nofilt,nocirc_filt,nocirc_nofilt
 
     # Batch all MIRI bands (default variant)
     python -m jwst_kernels.make_kernels miri --just-processed-psf \
@@ -105,6 +129,10 @@ Generate Aniano-processed source PSFs (no kernel):
     # Batch all bands, only the un-circularized Fourier-filtered variant
     python -m jwst_kernels.make_kernels all --just-processed-psf \
         --config config.toml -j 8 --psf-variants nocirc_filt
+
+    # Batch all bands, spatial-only (no circularize, no Fourier filter)
+    python -m jwst_kernels.make_kernels all --just-processed-psf \
+        --config config.toml -j 8 --psf-variants nocirc_nofilt
 
 Output
 ------
@@ -118,6 +146,17 @@ Notes
 - Existing kernels are skipped unless --overwrite is specified
 - Parallel processing only applies to batch mode
 - All bands must be valid JWST filter names
+- Cross kernels are only generated short-wavelength -> long-wavelength
+  (high-res -> low-res). The reverse direction is intentionally never
+  attempted because convolution cannot sharpen a PSF.
+- ``--psf-variants`` only has any effect together with
+  ``--just-processed-psf``; passing a non-default value without it is an
+  error.
+- ``all`` (batch mode, no ``--just-processed-psf``) runs MIRI Gaussian +
+  MIRI cross + NIRCam Gaussian + NIRCam cross + NIRCam->MIRI cross. It
+  does NOT produce Aniano-processed source PSFs.
+- ``all --just-processed-psf`` generates Aniano-processed PSFs for every
+  MIRI and NIRCam band (no kernels are produced in that mode).
 
 """
 
@@ -165,9 +204,10 @@ target_gauss_fwhm_list = [0.35, 0.9, 4, 7.5, 15]
 # high-pass filter flag, and picks a distinct filename suffix so all three
 # variants can coexist on disk.
 PSF_VARIANTS = {
-    "circ_filt":   {"do_circularize": True,  "do_fourier_filter": True,  "suffix": "aniano_circ_filt"},
-    "circ_nofilt": {"do_circularize": True,  "do_fourier_filter": False, "suffix": "aniano_circ_nofilt"},
-    "nocirc_filt": {"do_circularize": False, "do_fourier_filter": True,  "suffix": "aniano_nocirc_filt"},
+    "circ_filt":     {"do_circularize": True,  "do_fourier_filter": True,  "suffix": "aniano_circ_filt"},
+    "circ_nofilt":   {"do_circularize": True,  "do_fourier_filter": False, "suffix": "aniano_circ_nofilt"},
+    "nocirc_filt":   {"do_circularize": False, "do_fourier_filter": True,  "suffix": "aniano_nocirc_filt"},
+    "nocirc_nofilt": {"do_circularize": False, "do_fourier_filter": False, "suffix": "aniano_nocirc_nofilt"},
 }
 DEFAULT_PSF_VARIANT = "circ_filt"
 
@@ -544,8 +584,13 @@ def process_nircam_gauss(
 
 def process_miri_cross(
         n_procs=1, psf_dir=None, outdir=None, overwrite=False):
-    """Process MIRI to MIRI cross kernels
-    
+    """Process MIRI to MIRI cross kernels.
+
+    Only generates kernels from shorter-wavelength MIRI bands to
+    longer-wavelength MIRI bands (i.e. MIRI_BANDS[i] -> MIRI_BANDS[j]
+    for j > i). The reverse direction is never attempted because
+    convolution cannot sharpen a PSF.
+
     Parameters
     ----------
     n_procs : int
@@ -586,8 +631,13 @@ def process_miri_cross(
 
 def process_nircam_cross(
         n_procs=1, psf_dir=None, outdir=None, overwrite=False):
-    """Process NIRCam to NIRCam cross kernels
-    
+    """Process NIRCam to NIRCam cross kernels.
+
+    Only generates kernels from shorter-wavelength NIRCam bands to
+    longer-wavelength NIRCam bands (NIRCAM_BANDS[i] -> NIRCAM_BANDS[j]
+    for j > i). The reverse direction is never attempted because
+    convolution cannot sharpen a PSF.
+
     Parameters
     ----------
     n_procs : int
@@ -628,8 +678,13 @@ def process_nircam_cross(
     
 def process_cross_instrument(
         n_procs=1, psf_dir=None, outdir=None, overwrite=False):
-    """Process NIRCam to MIRI cross kernels
-    
+    """Process NIRCam to MIRI cross kernels.
+
+    Generates kernels from every NIRCam band to every MIRI band. Because
+    all NIRCam bands are at shorter wavelengths than all MIRI bands, this
+    is always the physically meaningful short -> long (high-res ->
+    low-res) direction. MIRI -> NIRCam kernels are never generated.
+
     Parameters
     ----------
     n_procs : int
@@ -922,16 +977,27 @@ def main():
 Directory Configuration:
   Provide directories via CLI args or config file (CLI args override config):
   
+  General usage:
+        %(prog)s <camera> --config <config_file>
+  or equivalently:
+        %(prog)s <camera> --psf-dir <psf_dir> --kernel-dir <kernel_dir>
+
+  More examples:
+
   %(prog)s miri --psf-dir /path/to/psfs --kernel-dir /path/to/kernels
   %(prog)s miri --config my_config.toml
   %(prog)s miri --config my_config.toml --kernel-dir /override/path  # CLI overrides config
 
 Batch Processing Examples:
-  %(prog)s miri --config config.toml              # Process only MIRI bands
-  %(prog)s nircam --psf-dir ./psfs --kernel-dir ./out  # NIRCam with direct paths
-  %(prog)s miri nircam --config config.toml       # Process both MIRI and NIRCam
-  %(prog)s cross --config config.toml             # Process only cross kernels
-  %(prog)s all --config config.toml               # Process everything (default)
+  Cross kernels are only generated short-wavelength -> long-wavelength
+  (the reverse direction is never attempted).
+
+  %(prog)s miri --config config.toml              # MIRI Gaussian + MIRI->MIRI cross kernels
+  %(prog)s nircam --psf-dir ./psfs --kernel-dir ./out  # NIRCam Gaussian + NIRCam->NIRCam cross kernels
+  %(prog)s miri nircam --config config.toml       # Process both MIRI and NIRCam (no NIRCam->MIRI)
+  %(prog)s cross --config config.toml             # NIRCam->MIRI cross kernels only
+  %(prog)s all --config config.toml               # Everything: miri + nircam + cross (matching kernels only;
+                                                   #   NOT Aniano-processed PSFs unless --just-processed-psf)
   %(prog)s miri --config config.toml --overwrite  # Overwrite existing kernels
   %(prog)s miri --config config.toml -j 8         # Use 8 parallel processes
 
@@ -944,12 +1010,24 @@ Aniano-processed PSF Examples:
   %(prog)s --from F335M --just-processed-psf --config config.toml # Aniano-processed PSF (default: circ_filt)
   %(prog)s miri --just-processed-psf --config config.toml -j 8 # Batch MIRI (default: circ_filt)
   %(prog)s --from F335M --just-processed-psf --config config.toml \\
-      --psf-variants circ_filt,circ_nofilt,nocirc_filt # All three variants in one call
+      --psf-variants circ_filt,circ_nofilt,nocirc_filt,nocirc_nofilt # All four variants in one call
+  %(prog)s --from F335M --just-processed-psf --config config.toml \\
+      --psf-variants nocirc_nofilt # Spatial processing only (no circularize, no Fourier filter)
         """)
     
     parser.add_argument('cameras', nargs='*', default=None,
                         choices=['miri', 'nircam', 'cross', 'all'],
-                        help='Camera(s) to process for batch mode (default: all if no --from specified)')
+                        help=(
+                            'Camera set(s) to process in batch mode '
+                            '(default: "all" if no --from specified). '
+                            '"miri" = MIRI Gaussian + MIRI->MIRI cross kernels; '
+                            '"nircam" = NIRCam Gaussian + NIRCam->NIRCam cross kernels; '
+                            '"cross" = NIRCam->MIRI cross kernels; '
+                            '"all" = miri + nircam + cross. '
+                            'Cross kernels are always short->long wavelength only. '
+                            'Without --just-processed-psf this produces matching '
+                            'kernels only (no Aniano-processed source PSFs).'
+                        ))
     
     parser.add_argument('--from', dest='from_band', type=str,
                         help='Source band for single kernel generation')
@@ -972,7 +1050,9 @@ Aniano-processed PSF Examples:
                             f'Default: {DEFAULT_PSF_VARIANT}. '
                             'circ_filt = real-space circularize + Fourier high-pass filter; '
                             'circ_nofilt = real-space circularize only (no Fourier filter); '
-                            'nocirc_filt = Fourier filter only (no real-space circularize). '
+                            'nocirc_filt = Fourier filter only (no real-space circularize); '
+                            'nocirc_nofilt = neither circularize nor filter (spatial processing only: '
+                            'interp NaNs, resample, centroid, resize, normalize). '
                             'Only meaningful together with --just-processed-psf.'
                         ))
 
