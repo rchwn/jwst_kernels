@@ -662,6 +662,21 @@ class MakeConvolutionKernel:
         if self.verbose:
             print('common pixel grid', self.source_psf.shape)
 
+        self._fourier_kernel_pipeline()
+
+    def _fourier_kernel_pipeline(self):
+        """Run the Fourier-domain kernel construction on already-spatially-processed PSFs.
+
+        Assumes ``self.source_psf`` and ``self.target_psf`` are on the common
+        pixel grid, centroided, normalized, and ready for FFT. Populates
+        ``self.source_fourier``, ``self.target_fourier``, ``self.kernel_fourier``,
+        and ``self.kernel``.
+        """
+        if self.target_psf is None:
+            raise ValueError('target_psf is required to build a convolution kernel.')
+        if self.target_fwhm is None:
+            raise ValueError('target_fwhm is required to build a convolution kernel.')
+
         if self.verbose:
             print('FFTing')
 
@@ -739,6 +754,54 @@ class MakeConvolutionKernel:
         self.kernel = circularize(self.kernel)
         self.kernel /= np.nanmax(self.kernel)
 
+    def make_convolution_kernel_from_processed(self):
+        """Generate a convolution kernel from already-processed source and target PSFs.
+
+        Both ``self.source_psf`` and ``self.target_psf`` must already be
+        spatially processed (interp NaNs, resample, centroid, optionally
+        circularize, resize, normalize) and live on a common pixel grid.
+        This method skips the spatial ``_process_psf`` step and runs only
+        the Fourier-domain kernel construction pipeline.
+
+        Requires:
+            - ``self.target_psf`` is not None.
+            - ``self.source_psf.shape == self.target_psf.shape``.
+            - ``self.source_pixscale`` is close to ``self.target_pixscale``.
+        """
+        if self.target_psf is None:
+            raise ValueError('target_psf is required for make_convolution_kernel_from_processed. '
+                             'Use process_source_psf() to process the source PSF alone.')
+        if self._source_processed or self._target_processed:
+            raise RuntimeError('PSFs have already been processed. '
+                               'Create a new MakeConvolutionKernel instance to reprocess.')
+        if self.source_psf.shape != self.target_psf.shape:
+            raise ValueError(
+                f'source_psf and target_psf must have the same shape, got '
+                f'{self.source_psf.shape} vs {self.target_psf.shape}.'
+            )
+        if not np.isclose(self.source_pixscale, self.target_pixscale):
+            raise ValueError(
+                f'source_pixscale ({self.source_pixscale}) and target_pixscale '
+                f'({self.target_pixscale}) must be (close to) equal.'
+            )
+
+        if self.common_pixscale is None:
+            self.common_pixscale = self.source_pixscale
+        elif not np.isclose(self.common_pixscale, self.source_pixscale):
+            raise ValueError(
+                f'common_pixscale ({self.common_pixscale}) must match '
+                f'source/target pixscale ({self.source_pixscale}).'
+            )
+
+        self._source_processed = True
+        self._target_processed = True
+
+        if self.verbose:
+            print('Skipping spatial processing (inputs already processed)')
+            print('common pixel grid', self.source_psf.shape)
+
+        self._fourier_kernel_pipeline()
+
     def save_processed_psf(self, outdir, which='source', filename_suffix='aniano_circ_filt'):
         """Save a processed PSF to a FITS file.
 
@@ -782,7 +845,7 @@ class MakeConvolutionKernel:
 
         return saved
 
-    def write_out_kernel(self, outdir=None, add_keys=None, naming_convention='PHANGS'):
+    def write_out_kernel(self, outdir=None, add_keys=None, naming_convention='PHANGS', print_name=False):
         """
 
         Returns:
@@ -819,6 +882,8 @@ class MakeConvolutionKernel:
                 hdu.header[key] = add_keys[key]
 
         hdu.writeto(file_name, overwrite=True)
+        if print_name:
+            print(f"Saved: {file_name}")
 
 
 

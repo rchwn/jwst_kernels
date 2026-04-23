@@ -17,6 +17,10 @@ Features
     nocirc_nofilt (neither circularize nor filter; spatial processing only:
                    interp NaNs, resample, centroid, resize, normalize)
   Select with --psf-variants circ_filt,circ_nofilt,nocirc_filt,nocirc_nofilt
+- Processed-to-processed kernel generation (--processed-kernel) between two
+  variants of the same band (default: nocirc_nofilt -> circ_filt; configure
+  with --from-variant / --to-variant). Reads processed PSFs from the output
+  directory and regenerates any missing ones.
 - Parallel processing with multiprocessing
 
 Requirements
@@ -134,6 +138,46 @@ Generate Aniano-processed source PSFs (no kernel):
     python -m jwst_kernels.make_kernels all --just-processed-psf \
         --config config.toml -j 8 --psf-variants nocirc_nofilt
 
+Processed-to-processed Kernel Usage
+-----------------------------------
+Generate a matching kernel between two processed-PSF variants of the same
+band. Source and target variants are configurable via --from-variant and
+--to-variant (defaults: nocirc_nofilt -> circ_filt). Missing processed
+PSFs are regenerated on demand.
+
+    # Single band, default variants (nocirc_nofilt -> circ_filt). This will make one
+    # kernel: F335M_aniano_nocirc_nofilt_to_aniano_circ_filt.fits.
+    python -m jwst_kernels.make_kernels --from F335M --processed-kernel \
+        --config config.toml
+
+    # Single band, custom variants
+    python -m jwst_kernels.make_kernels --from F770W --processed-kernel \
+        --from-variant nocirc_filt --to-variant circ_filt \
+        --config config.toml
+
+    # Batch all MIRI bands in parallel
+    python -m jwst_kernels.make_kernels miri --processed-kernel \
+        --config config.toml -j 8
+
+    # Batch everything (miri + nircam)
+    python -m jwst_kernels.make_kernels all --processed-kernel \
+        --config config.toml -j 8
+
+End-to-end Usage (--all-products)
+---------------------------------
+Run the full pipeline in a single invocation: Aniano-processed PSFs (both
+from/to variants), Gaussian + cross-band matching kernels, and same-band
+processed-to-processed kernels, all for the selected camera set.
+
+    # MIRI + NIRCam, default variants (nocirc_nofilt -> circ_filt)
+    python -m jwst_kernels.make_kernels all --all-products \
+        --config config.toml -j 8
+
+    # MIRI only, custom processed-to-processed variants
+    python -m jwst_kernels.make_kernels miri --all-products \
+        --from-variant nocirc_filt --to-variant circ_filt \
+        --config config.toml -j 8
+
 Output
 ------
 Kernels are saved to the configured output directory with naming:
@@ -174,6 +218,7 @@ from jwst_kernels.evaluate_kernels import find_safe_kernel, plot_evaluate
 from jwst_kernels.make_psf import read_PSF
 from jwst_kernels.kernel_core import (
     MakeConvolutionKernel,
+    get_pixscale,
     make_jwst_cross_kernel,
     make_jwst_kernel_to_Gauss,
     plot_kernel,
@@ -188,6 +233,7 @@ __all__ = [
     "read_PSF",
     "MakeConvolutionKernel",
     "make_aniano_processed_psf",
+    "make_processed_to_processed_kernel",
     "PSF_VARIANTS",
 ]
 
@@ -968,6 +1014,323 @@ def make_aniano_processed_psf(band, psf_dir, outdir, camera=None,
     return saved
 
 
+def _ensure_processed_psf(band, variant_key, psf_dir, outdir, camera=None,
+                          overwrite=False, **kwargs):
+    """Return the path to a processed PSF FITS file, generating it if missing.
+
+    Parameters
+    ----------
+    band : str
+        Band name (e.g. F335M).
+    variant_key : str
+        Key into :data:`PSF_VARIANTS`.
+    psf_dir : str
+        Directory where raw PSFs live (passed through to
+        :func:`make_aniano_processed_psf` if regeneration is needed).
+    outdir : str
+        Directory where processed PSFs are stored.
+    camera : str, optional
+        Camera name. Auto-detected if None.
+    overwrite : bool
+        If True, always regenerate.
+    **kwargs
+        Forwarded to :func:`make_aniano_processed_psf` if regeneration runs.
+
+    Returns
+    -------
+    str
+        Absolute/relative path to the processed PSF FITS file on disk.
+    """
+    if variant_key not in PSF_VARIANTS:
+        raise ValueError(
+            f"Unknown PSF variant: {variant_key}. "
+            f"Allowed: {sorted(PSF_VARIANTS.keys())}"
+        )
+    variant = PSF_VARIANTS[variant_key]
+    suffix = variant["suffix"]
+    outfile = os.path.join(str(outdir), f"{band}_{suffix}.fits")
+
+    if overwrite or not os.path.isfile(outfile):
+        print(f"Generating missing/overwrite processed PSF: {outfile}")
+        make_aniano_processed_psf(
+            band, psf_dir=psf_dir, outdir=outdir, camera=camera,
+            overwrite=overwrite, filename_suffix=suffix,
+            do_circularize=variant["do_circularize"],
+            do_fourier_filter=variant["do_fourier_filter"],
+            **kwargs,
+        )
+
+    if not os.path.isfile(outfile):
+        raise FileNotFoundError(
+            f"Processed PSF not found after generation attempt: {outfile}"
+        )
+
+    return outfile
+
+
+def make_processed_to_processed_kernel(
+        band, from_variant='nocirc_nofilt', to_variant='circ_filt',
+        psf_dir=None, outdir=None, overwrite=False, save_kernel=True,
+        verbose=False, **kwargs):
+    """Generate a matching kernel between two processed PSF variants of the same band.
+
+    Reads (or regenerates on demand) ``{band}_{from_suffix}.fits`` and
+    ``{band}_{to_suffix}.fits`` from ``outdir``, validates that they share the
+    same shape and pixel scale, and then builds an Aniano-style matching
+    kernel that takes the ``from_variant`` PSF to the ``to_variant`` PSF.
+    The spatial-processing pipeline is skipped (the inputs are already
+    processed); only the Fourier-domain kernel construction runs.
+
+    Parameters
+    ----------
+    band : str
+        Band name (e.g. F335M, F770W).
+    from_variant, to_variant : str
+        Keys into :data:`PSF_VARIANTS`. Defaults: ``nocirc_nofilt`` -> ``circ_filt``.
+    psf_dir : str
+        Directory where raw PSFs live (used only if a processed PSF is missing
+        and must be regenerated via :func:`make_aniano_processed_psf`).
+    outdir : str
+        Directory where processed PSFs are stored and where the output kernel
+        is written.
+    overwrite : bool
+        If True, regenerate processed PSFs (and overwrite an existing output
+        kernel) instead of reusing on-disk copies.
+    save_kernel : bool
+        Whether to write the kernel FITS file.
+    verbose : bool
+        Passed through to :class:`MakeConvolutionKernel`.
+    **kwargs
+        Forwarded to :func:`make_aniano_processed_psf` when regenerating
+        missing processed PSFs (e.g. ``oversample_factor``).
+
+    Returns
+    -------
+    MakeConvolutionKernel
+        The kernel object (with ``kernel`` populated).
+    """
+    if from_variant not in PSF_VARIANTS:
+        raise ValueError(
+            f"Unknown from_variant: {from_variant}. "
+            f"Allowed: {sorted(PSF_VARIANTS.keys())}"
+        )
+    if to_variant not in PSF_VARIANTS:
+        raise ValueError(
+            f"Unknown to_variant: {to_variant}. "
+            f"Allowed: {sorted(PSF_VARIANTS.keys())}"
+        )
+    if from_variant == to_variant:
+        raise ValueError(
+            f"from_variant and to_variant must differ (got both={from_variant})."
+        )
+
+    if psf_dir is None or outdir is None:
+        raise ValueError("psf_dir and outdir must be provided.")
+
+    from_suffix = PSF_VARIANTS[from_variant]["suffix"]
+    to_suffix = PSF_VARIANTS[to_variant]["suffix"]
+    camera = detect_camera(band)
+
+    print(f"\n=== Creating processed-to-processed kernel: "
+          f"{band} [{from_variant}] -> {band} [{to_variant}] ===")
+
+    src_file = _ensure_processed_psf(
+        band, from_variant, psf_dir=psf_dir, outdir=outdir,
+        camera=camera, overwrite=overwrite, **kwargs,
+    )
+    tgt_file = _ensure_processed_psf(
+        band, to_variant, psf_dir=psf_dir, outdir=outdir,
+        camera=camera, overwrite=overwrite, **kwargs,
+    )
+
+    with fits.open(src_file) as hdul:
+        src_data = np.array(hdul[0].data, dtype=float)
+        src_pix = get_pixscale(hdul[0].header)
+    with fits.open(tgt_file) as hdul:
+        tgt_data = np.array(hdul[0].data, dtype=float)
+        tgt_pix = get_pixscale(hdul[0].header)
+
+    if src_data.shape != tgt_data.shape:
+        raise ValueError(
+            f"Processed PSF shapes differ: "
+            f"{os.path.basename(src_file)}={src_data.shape} vs "
+            f"{os.path.basename(tgt_file)}={tgt_data.shape}. "
+            f"Cannot build a kernel between incompatible grids."
+        )
+    if not np.isclose(src_pix, tgt_pix):
+        raise ValueError(
+            f"Processed PSF pixel scales differ: "
+            f"{os.path.basename(src_file)}={src_pix} vs "
+            f"{os.path.basename(tgt_file)}={tgt_pix}. "
+            f"Cannot build a kernel between incompatible grids."
+        )
+
+    common_pixscale = float(src_pix)
+    grid_size_arcsec = np.array(src_data.shape, dtype=float) * common_pixscale
+    source_name = f"{band}_{from_suffix}"
+    target_name = f"{band}_{to_suffix}"
+    kk = MakeConvolutionKernel(
+        source_psf=src_data,
+        source_pixscale=common_pixscale,
+        source_name=source_name,
+        target_psf=tgt_data,
+        target_pixscale=common_pixscale,
+        target_name=target_name,
+        common_pixscale=common_pixscale,
+        grid_size_arcsec=grid_size_arcsec,
+        verbose=verbose,
+    )
+    kk.make_convolution_kernel_from_processed()
+
+    if save_kernel:
+        add_keys = {
+            "FROMVAR": (from_variant, "source PSF variant"),
+            "TOVAR": (to_variant, "target PSF variant"),
+            "BAND": (band, "JWST band"),
+        }
+        kk.write_out_kernel(outdir=str(outdir), add_keys=add_keys,
+                            naming_convention='PHANGS', print_name=True)
+    else:
+        print("Kernel not saved")
+    return kk
+
+
+def check_processed_kernel_exists(band, from_variant, to_variant, outdir):
+    """Check whether a processed-to-processed kernel already exists on disk.
+
+    Mirrors the naming used by :meth:`MakeConvolutionKernel.write_out_kernel`
+    with ``naming_convention='PHANGS'`` (lowercase ``source_name_to_target_name.fits``).
+    """
+    from_suffix = PSF_VARIANTS[from_variant]["suffix"]
+    to_suffix = PSF_VARIANTS[to_variant]["suffix"]
+    source_name = f"{band}_{from_suffix}".lower()
+    target_name = f"{band}_{to_suffix}".lower().replace('.', 'p')
+    kernel_file = os.path.join(str(outdir), f"{source_name}_to_{target_name}.fits")
+    if os.path.isfile(kernel_file):
+        return True, kernel_file
+    return False, None
+
+
+def make_processed_kernel_worker(task):
+    """Worker function for parallel processed-to-processed kernel generation.
+
+    Parameters
+    ----------
+    task : tuple
+        (band, psf_dir, outdir, overwrite, from_variant, to_variant)
+
+    Returns
+    -------
+    dict
+        Result dictionary with status and info.
+    """
+    band, psf_dir, outdir, overwrite, from_variant, to_variant = task
+
+    try:
+        exists, kernel_file = check_processed_kernel_exists(
+            band, from_variant, to_variant, outdir)
+
+        if exists and not overwrite:
+            return {
+                'success': True,
+                'band': band,
+                'from_variant': from_variant,
+                'to_variant': to_variant,
+                'status': 'skipped',
+                'message': f"SKIPPED (exists: {os.path.basename(kernel_file)})"
+            }
+
+        status = 'overwriting' if exists else 'creating'
+
+        make_processed_to_processed_kernel(
+            band, from_variant=from_variant, to_variant=to_variant,
+            psf_dir=psf_dir, outdir=outdir, overwrite=overwrite,
+            save_kernel=True,
+        )
+
+        return {
+            'success': True,
+            'band': band,
+            'from_variant': from_variant,
+            'to_variant': to_variant,
+            'status': status,
+            'message': f"{'OVERWRITTEN' if exists else 'CREATED'}"
+        }
+
+    except Exception as e:
+        return {
+            'success': False,
+            'band': band,
+            'from_variant': from_variant,
+            'to_variant': to_variant,
+            'status': 'error',
+            'message': f"ERROR: {str(e)}"
+        }
+
+
+def process_processed_kernels(
+        bands, n_procs=1, psf_dir=None, outdir=None, overwrite=False,
+        from_variant='nocirc_nofilt', to_variant='circ_filt'):
+    """Batch-process processed-to-processed kernels for a list of bands.
+
+    Parameters
+    ----------
+    bands : list[str]
+        Bands to process.
+    n_procs : int
+        Number of parallel processes.
+    psf_dir, outdir : str
+        Input (raw PSF) and output directories.
+    overwrite : bool
+        Whether to overwrite existing processed PSFs and kernels.
+    from_variant, to_variant : str
+        Keys into :data:`PSF_VARIANTS`.
+    """
+    if from_variant not in PSF_VARIANTS:
+        raise ValueError(
+            f"Unknown from_variant: {from_variant}. "
+            f"Allowed: {sorted(PSF_VARIANTS.keys())}"
+        )
+    if to_variant not in PSF_VARIANTS:
+        raise ValueError(
+            f"Unknown to_variant: {to_variant}. "
+            f"Allowed: {sorted(PSF_VARIANTS.keys())}"
+        )
+    if from_variant == to_variant:
+        raise ValueError(
+            f"from_variant and to_variant must differ (got both={from_variant})."
+        )
+
+    print("\n=== Processing processed-to-processed kernels ===")
+    print(f"Using {n_procs} parallel processes")
+    print(f"Variants: {from_variant} -> {to_variant}")
+
+    tasks = [
+        (band, psf_dir, outdir, overwrite, from_variant, to_variant)
+        for band in bands
+    ]
+
+    print(f"Total tasks: {len(tasks)}")
+
+    if n_procs > 1:
+        with mp.Pool(n_procs) as pool:
+            results = pool.map(make_processed_kernel_worker, tasks)
+    else:
+        results = [make_processed_kernel_worker(task) for task in tasks]
+
+    created = sum(1 for r in results if r['status'] in ['creating', 'overwriting'])
+    skipped = sum(1 for r in results if r['status'] == 'skipped')
+    errors = sum(1 for r in results if r['status'] == 'error')
+
+    for result in results:
+        band = result['band']
+        msg = result['message']
+        print(f"  {band} [{from_variant} -> {to_variant}]: {msg}")
+
+    print(f"\nProcessed-to-processed kernel summary: "
+          f"{created} created, {skipped} skipped, {errors} errors")
+
+
 def main():
 
     parser = argparse.ArgumentParser(
@@ -1013,6 +1376,18 @@ Aniano-processed PSF Examples:
       --psf-variants circ_filt,circ_nofilt,nocirc_filt,nocirc_nofilt # All four variants in one call
   %(prog)s --from F335M --just-processed-psf --config config.toml \\
       --psf-variants nocirc_nofilt # Spatial processing only (no circularize, no Fourier filter)
+
+Processed-to-processed Kernel Examples:
+  %(prog)s --from F335M --processed-kernel --config config.toml  # nocirc_nofilt -> circ_filt (default)
+  %(prog)s --from F770W --processed-kernel --config config.toml \\
+      --from-variant nocirc_filt --to-variant circ_filt          # Custom variant pair
+  %(prog)s miri --processed-kernel --config config.toml -j 8     # Batch MIRI
+  %(prog)s all --processed-kernel --config config.toml -j 8      # Batch MIRI + NIRCam
+
+End-to-end (--all-products) Examples:
+  %(prog)s all  --all-products --config config.toml -j 8         # Processed PSFs + matching kernels + processed kernels
+  %(prog)s miri --all-products --config config.toml -j 8 \\
+      --from-variant nocirc_filt --to-variant circ_filt          # MIRI only, custom variant pair
         """)
     
     parser.add_argument('cameras', nargs='*', default=None,
@@ -1041,6 +1416,39 @@ Aniano-processed PSF Examples:
     parser.add_argument('--just-processed-psf', action='store_true',
                         help='Only generate Aniano-processed source PSF (not kernel(s)). '
                              'Use with --from for single band, or with camera args for batch.')
+
+    parser.add_argument('--processed-kernel', dest='processed_kernel',
+                        action='store_true',
+                        help='Generate a matching kernel between two processed PSF '
+                             'variants of the same band (source -> target controlled by '
+                             '--from-variant and --to-variant). Reads processed PSFs '
+                             'from the kernel dir and regenerates any missing ones. '
+                             'Mutually exclusive with --to, --to-gauss, and '
+                             '--just-processed-psf.')
+
+    parser.add_argument('--all-products', dest='all_products', action='store_true',
+                        help='End-to-end batch run: generate Aniano-processed PSFs '
+                             '(from_variant + to_variant), Gaussian + cross-band '
+                             'matching kernels, and same-band processed-to-processed '
+                             'kernels in one invocation. Batch-only (requires a camera '
+                             'selector, not --from). Mutually exclusive with '
+                             '--just-processed-psf, --processed-kernel, --to, --to-gauss.')
+
+    parser.add_argument('--from-variant', dest='from_variant', type=str,
+                        default='nocirc_nofilt',
+                        help=(
+                            'Source processed-PSF variant for --processed-kernel. '
+                            f'Allowed: {",".join(sorted(PSF_VARIANTS.keys()))}. '
+                            'Default: nocirc_nofilt.'
+                        ))
+
+    parser.add_argument('--to-variant', dest='to_variant', type=str,
+                        default='circ_filt',
+                        help=(
+                            'Target processed-PSF variant for --processed-kernel. '
+                            f'Allowed: {",".join(sorted(PSF_VARIANTS.keys()))}. '
+                            'Default: circ_filt.'
+                        ))
 
     parser.add_argument('--psf-variants', dest='psf_variants', type=str,
                         default=DEFAULT_PSF_VARIANT,
@@ -1089,6 +1497,54 @@ Aniano-processed PSF Examples:
         )
     if (args.psf_variants != DEFAULT_PSF_VARIANT) and not args.just_processed_psf:
         parser.error("--psf-variants is only meaningful with --just-processed-psf")
+
+    # Validate --processed-kernel mutual exclusions and variant choices
+    if args.processed_kernel:
+        if args.just_processed_psf:
+            parser.error("--processed-kernel is mutually exclusive with --just-processed-psf")
+        if args.to_band:
+            parser.error("--processed-kernel is mutually exclusive with --to")
+        if args.to_gauss is not None:
+            parser.error("--processed-kernel is mutually exclusive with --to-gauss")
+    if args.from_variant not in PSF_VARIANTS:
+        parser.error(
+            f"Unknown --from-variant: {args.from_variant}. "
+            f"Allowed: {sorted(PSF_VARIANTS.keys())}"
+        )
+    if args.to_variant not in PSF_VARIANTS:
+        parser.error(
+            f"Unknown --to-variant: {args.to_variant}. "
+            f"Allowed: {sorted(PSF_VARIANTS.keys())}"
+        )
+    if args.processed_kernel and args.from_variant == args.to_variant:
+        parser.error(
+            f"--from-variant and --to-variant must differ "
+            f"(got both={args.from_variant})."
+        )
+    if (args.from_variant != 'nocirc_nofilt' or args.to_variant != 'circ_filt') \
+            and not (args.processed_kernel or args.all_products):
+        parser.error(
+            "--from-variant/--to-variant are only meaningful with "
+            "--processed-kernel or --all-products"
+        )
+
+    # Validate --all-products mutual exclusions and batch-only requirement
+    if args.all_products:
+        if args.just_processed_psf:
+            parser.error("--all-products is mutually exclusive with --just-processed-psf")
+        if args.processed_kernel:
+            parser.error("--all-products is mutually exclusive with --processed-kernel")
+        if args.from_band:
+            parser.error("--all-products is batch-only; remove --from")
+        if args.to_band:
+            parser.error("--all-products is mutually exclusive with --to")
+        if args.to_gauss is not None:
+            parser.error("--all-products is mutually exclusive with --to-gauss")
+        if args.from_variant == args.to_variant:
+            parser.error(
+                f"--from-variant and --to-variant must differ "
+                f"(got both={args.from_variant})."
+            )
 
     # Set directories from CLI args or config file
     # CLI args take precedence over config file
@@ -1146,8 +1602,24 @@ Aniano-processed PSF Examples:
             print("\n=== Done ===")
             return 0
 
+        if args.processed_kernel:
+            try:
+                make_processed_to_processed_kernel(
+                    args.from_band,
+                    from_variant=args.from_variant,
+                    to_variant=args.to_variant,
+                    psf_dir=psf_dir, outdir=outdir,
+                    overwrite=overwrite,
+                )
+            except (ValueError, FileNotFoundError) as e:
+                print(f"Error: {e}")
+                return 1
+            print("\n=== Done ===")
+            return 0
+
         if not args.to_band and args.to_gauss is None:
-            parser.error("--from requires either --to, --to-gauss, or --just-processed-psf")
+            parser.error("--from requires either --to, --to-gauss, --just-processed-psf, "
+                         "or --processed-kernel")
         if args.to_band and args.to_gauss is not None:
             parser.error("Cannot use both --to and --to-gauss together")
         
@@ -1205,6 +1677,77 @@ Aniano-processed PSF Examples:
             psf_dir=psf_dir, outdir=outdir,
             overwrite=overwrite,
             variants=psf_variants)
+        print("\n=== Done ===")
+        return 0
+
+    if args.processed_kernel:
+        bands = []
+        if 'miri' in cameras:
+            bands += MIRI_BANDS
+        if 'nircam' in cameras:
+            bands += NIRCAM_BANDS
+        if 'cross' in cameras and 'miri' not in cameras and 'nircam' not in cameras:
+            bands += MIRI_BANDS + NIRCAM_BANDS
+        process_processed_kernels(
+            bands=bands, n_procs=n_procs,
+            psf_dir=psf_dir, outdir=outdir,
+            overwrite=overwrite,
+            from_variant=args.from_variant,
+            to_variant=args.to_variant)
+        print("\n=== Done ===")
+        return 0
+
+    if args.all_products:
+        print("\n*** --all-products: running full end-to-end pipeline ***")
+
+        # Part 1: processed PSFs for both variants needed by the processed-kernel step
+        bands = []
+        if 'miri' in cameras:
+            bands += MIRI_BANDS
+        if 'nircam' in cameras:
+            bands += NIRCAM_BANDS
+        if 'cross' in cameras and 'miri' not in cameras and 'nircam' not in cameras:
+            bands += MIRI_BANDS + NIRCAM_BANDS
+
+        variants_for_psfs = sorted({args.from_variant, args.to_variant})
+        print(f"\n--- Part 1/3: Aniano-processed PSFs ({variants_for_psfs}) ---")
+        process_aniano_psfs(
+            bands=bands, n_procs=n_procs,
+            psf_dir=psf_dir, outdir=outdir,
+            overwrite=overwrite,
+            variants=variants_for_psfs)
+
+        # Part 2: Gaussian + cross matching kernels (same as default batch)
+        print("\n--- Part 2/3: Gaussian + cross matching kernels ---")
+        if 'miri' in cameras:
+            process_miri_gauss(
+                n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
+                overwrite=overwrite)
+            process_miri_cross(
+                n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
+                overwrite=overwrite)
+        if 'nircam' in cameras:
+            process_nircam_gauss(
+                n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
+                overwrite=overwrite)
+            process_nircam_cross(
+                n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
+                overwrite=overwrite)
+        if 'cross' in cameras:
+            process_cross_instrument(
+                n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
+                overwrite=overwrite)
+
+        # Part 3: processed-to-processed kernels
+        print(f"\n--- Part 3/3: processed-to-processed kernels "
+              f"({args.from_variant} -> {args.to_variant}) ---")
+        process_processed_kernels(
+            bands=bands, n_procs=n_procs,
+            psf_dir=psf_dir, outdir=outdir,
+            overwrite=overwrite,
+            from_variant=args.from_variant,
+            to_variant=args.to_variant)
+
         print("\n=== Done ===")
         return 0
 
