@@ -820,3 +820,205 @@ class MakeConvolutionKernel:
                 hdu.header[key] = add_keys[key]
 
         hdu.writeto(file_name, overwrite=True)
+
+
+
+def make_jwst_cross_kernel(input_filter, target_filter, psf_dir=None,
+                           outdir=None, save_kernel=False,
+                           common_pixscale=None, detector_effects=True,
+                           naming_convention='PHANGS', verbose=False):
+    """Generate the kernel that matches a JWST input filter to a target JWST filter.
+
+    Works for both MIRI and NIRCam. If the source or target raw PSF is not
+    found under ``psf_dir``, ``read_PSF`` will regenerate it via webbpsf.
+
+    Parameters
+    ----------
+    input_filter, target_filter : dict
+        Each must have ``'camera'`` and ``'filter'`` keys.
+    psf_dir, outdir : str, optional
+        Where raw PSFs live, and where kernels are written.
+    save_kernel : bool
+        Whether to write the kernel to disk.
+    common_pixscale : float, optional
+        Force the common pixel scale used for resampling. Defaults to the
+        source pixel scale.
+    detector_effects : bool
+        Whether to pull the ``OVERDIST`` extension (detector effects on).
+    naming_convention : str
+        Filename convention passed through to ``write_out_kernel``.
+
+    Returns
+    -------
+    MakeConvolutionKernel
+    """
+    from jwst_kernels.make_psf import read_PSF
+
+    source_psf, source_pixscale = read_PSF(
+        input_filter, detector_effects=detector_effects, psf_dir=psf_dir)
+    target_psf, target_pixscale = read_PSF(
+        target_filter, detector_effects=detector_effects, psf_dir=psf_dir)
+
+    if common_pixscale is None:
+        common_pixscale = source_pixscale
+
+    grid_size_arcsec = np.array([361 * common_pixscale,
+                                 361 * common_pixscale])
+
+    kk = MakeConvolutionKernel(source_psf=source_psf,
+                               source_pixscale=source_pixscale,
+                               source_name=input_filter['filter'],
+                               target_psf=target_psf,
+                               target_pixscale=target_pixscale,
+                               target_name=target_filter['filter'],
+                               common_pixscale=common_pixscale,
+                               grid_size_arcsec=grid_size_arcsec,
+                               verbose=verbose)
+    kk.make_convolution_kernel()
+    dict_extension = {'DETEF': detector_effects}
+    if outdir is None:
+        outdir = os.path.abspath('.')
+    if save_kernel:
+        kk.write_out_kernel(outdir=outdir, add_keys=dict_extension,
+                            naming_convention=naming_convention)
+    return kk
+
+
+def make_jwst_kernel_to_Gauss(input_filter, target_gaussian, psf_dir=None,
+                              outdir=None, save_kernel=False,
+                              detector_effects=True,
+                              naming_convention='PHANGS', verbose=False,
+                              size_kernel_asec=None):
+    """Generate the kernel that matches a JWST filter PSF to a Gaussian target.
+
+    Parameters
+    ----------
+    input_filter : dict
+        Must have ``'camera'`` and ``'filter'`` keys.
+    target_gaussian : dict
+        Must have a ``'fwhm'`` key (arcsec).
+    psf_dir, outdir : str, optional
+    save_kernel : bool
+    detector_effects : bool
+    naming_convention : str
+    size_kernel_asec : float, optional
+        Override the auto-chosen kernel footprint (arcsec).
+
+    Returns
+    -------
+    MakeConvolutionKernel
+    """
+    from jwst_kernels.make_psf import read_PSF, makeGaussian_2D
+
+    source_psf, source_pixscale = read_PSF(
+        input_filter, detector_effects=detector_effects, psf_dir=psf_dir)
+
+    common_pixscale = source_pixscale
+    target_pixscale = source_pixscale
+
+    if size_kernel_asec is None:
+        sz = int(target_gaussian['fwhm'] / 2.355 * 20 / target_pixscale)
+    else:
+        sz = int(size_kernel_asec / target_pixscale)
+    if sz % 2 == 0:
+        sz += 1
+
+    yy, xx = np.meshgrid(np.arange(sz) - (sz - 1) / 2,
+                         np.arange(sz) - (sz - 1) / 2)
+    target_psf = makeGaussian_2D(
+        (xx, yy), (0, 0),
+        (target_gaussian['fwhm'] / 2.355 / target_pixscale,
+         target_gaussian['fwhm'] / 2.355 / target_pixscale))
+    target_name = 'gauss{:.2f}'.format(target_gaussian['fwhm'])
+
+    if verbose:
+        print('making kernel from ' + input_filter['filter']
+              + ' with source PSF to Gaussian with FWHM '
+              + '{:.3f}'.format(target_gaussian['fwhm']))
+
+    grid_size_arcsec = np.array([sz * target_pixscale, sz * target_pixscale])
+
+    kk = MakeConvolutionKernel(source_psf=source_psf,
+                               source_pixscale=source_pixscale,
+                               source_name=input_filter['filter'],
+                               target_psf=target_psf,
+                               target_pixscale=target_pixscale,
+                               target_name=target_name,
+                               common_pixscale=common_pixscale,
+                               grid_size_arcsec=grid_size_arcsec,
+                               verbose=verbose)
+    kk.make_convolution_kernel()
+    dict_extension = {'DETEF': detector_effects}
+    if outdir is None:
+        outdir = os.path.abspath('.')
+    if save_kernel:
+        kk.write_out_kernel(outdir=outdir, add_keys=dict_extension,
+                            naming_convention=naming_convention)
+    return kk
+
+
+def plot_kernel(kk, save_plot=False, save_dir=None, want_convolve=True):
+    """Plot source PSF, target PSF, and the kernel with radial profiles.
+
+    Parameters
+    ----------
+    kk : MakeConvolutionKernel
+    save_plot : bool
+    save_dir : str, optional
+    want_convolve : bool
+        Also convolve source x kernel and overlay it on the radial profile
+        (can be slow for large kernels).
+    """
+    import matplotlib.pyplot as plt
+    from astropy.convolution import convolve
+
+    fig, (ax1, ax2, ax3) = plt.subplots(ncols=3, figsize=(12, 4))
+
+    ax1.imshow(np.log10(kk.source_psf / np.max(kk.source_psf)),
+               vmax=0, vmin=-4)
+    ax1.set_title(kk.source_name)
+
+    ax2.imshow(np.log10(kk.target_psf / np.max(kk.target_psf)),
+               vmax=0, vmin=-4)
+    ax2.set_title(kk.target_name)
+
+    extent = int(10 * kk.target_fwhm / kk.common_pixscale / 2)
+    ax3.plot(*profile(kk.source_psf / np.max(kk.source_psf),
+                      bins=np.linspace(0, 6 * kk.target_fwhm, extent),
+                      pixscale=kk.common_pixscale),
+             c='b', label=kk.source_name)
+    ax3.plot(*profile(kk.target_psf / np.max(kk.target_psf),
+                      bins=np.linspace(0, 6 * kk.target_fwhm, extent),
+                      pixscale=kk.common_pixscale),
+             c='k', label=kk.target_name, lw=5)
+    ax3.plot(*profile(kk.kernel / np.max(kk.kernel),
+                      bins=np.linspace(0, 6 * kk.target_fwhm, extent),
+                      pixscale=kk.common_pixscale),
+             c='g', label='kernel')
+    if want_convolve:
+        target_conv = convolve(kk.source_psf, kk.kernel)
+        ax3.plot(*profile(target_conv / np.max(target_conv),
+                          bins=np.linspace(0, 6 * kk.target_fwhm, extent),
+                          pixscale=kk.common_pixscale),
+                 c='r', label='model', ls='-')
+
+        xx, targetprof = profile(
+            kk.target_psf / np.max(kk.target_psf),
+            bins=np.linspace(0, 6 * kk.target_fwhm, extent),
+            pixscale=kk.common_pixscale)
+        _, convprof = profile(
+            target_conv / np.max(target_conv),
+            bins=np.linspace(0, 6 * kk.target_fwhm, extent),
+            pixscale=kk.common_pixscale)
+        ax3.plot(xx, (targetprof - convprof),
+                 c='r', label='residual', ls='--')
+    ax3.legend()
+    ax3.set_ylim([-0.1, 1.1])
+    ax3.set_xlim([0, 6 * kk.target_fwhm])
+
+    if save_plot:
+        if save_dir is None:
+            save_dir = os.path.abspath('.')
+        plt.savefig(os.path.join(save_dir,
+                                 kk.source_name + '_' + kk.target_name + '.png'),
+                    dpi=300)

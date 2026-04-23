@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Mon May 22 18:10:43 2023
 
-@author: belfiore
-"""
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits, ascii
 import astropy.table as table
-from jwst_kernels.kernel_core import  fit_2d_gaussian
-from jwst_kernels.make_kernels import make_jwst_kernel_to_Gauss, plot_kernel
+from jwst_kernels.kernel_core import fit_2d_gaussian, make_jwst_kernel_to_Gauss, plot_kernel
 from jwst_kernels.make_psf import  read_PSF
 from astropy.convolution import convolve
 from os import path

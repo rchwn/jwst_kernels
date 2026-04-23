@@ -33,53 +33,78 @@ python setup.py develop
 Then to run in a modern version of numpy you need to edit
 "kernel_core" and replace np.alltrue with np.all
 
+Directory Configuration
+-----------------------
+Every invocation of the CLI needs both an input PSF directory and an output
+kernel directory. Supply them either directly via ``--psf-dir`` and
+``--kernel-dir``, or via a TOML config file via ``--config``:
+
+    # config.toml
+    psf_dir    = "/path/to/psfs/"
+    kernel_dir = "/path/to/output/kernels/"
+
+All examples below use ``--config config.toml`` for brevity; you can
+equivalently pass ``--psf-dir PATH --kernel-dir PATH``. If you use both,
+the explicit ``--psf-dir`` / ``--kernel-dir`` flags override the config.
+
 Batch Processing Usage
 ----------------------
 Process predefined sets of kernels in parallel:
 
     # Process all MIRI bands to Gaussian kernels (4", 7.5", 15")
-    python -m jwst_kernels.make_kernels miri -j 8
+    python -m jwst_kernels.make_kernels miri --config config.toml -j 8
 
     # Process all NIRCam bands to Gaussian kernels
-    python -m jwst_kernels.make_kernels nircam -j 8
+    python -m jwst_kernels.make_kernels nircam --config config.toml -j 8
 
     # Process NIRCam to F770W cross kernels
-    python -m jwst_kernels.make_kernels cross -j 8
+    python -m jwst_kernels.make_kernels cross --config config.toml -j 8
 
     # Process everything
-    python -m jwst_kernels.make_kernels all -j 8 --overwrite
+    python -m jwst_kernels.make_kernels all --config config.toml -j 8 --overwrite
+
+    # Same, but with paths on the CLI instead of a config file
+    python -m jwst_kernels.make_kernels all \
+        --psf-dir /path/to/psfs --kernel-dir /path/to/kernels -j 8
 
 Single Kernel Usage
 -------------------
 Generate individual kernels on demand:
 
     # Cross kernel: NIRCam F200W to MIRI F770W
-    python -m jwst_kernels.make_kernels --from F200W --to F770W
+    python -m jwst_kernels.make_kernels --from F200W --to F770W \
+        --config config.toml
 
     # Gaussian kernel: MIRI F770W to 7.5" Gaussian
-    python -m jwst_kernels.make_kernels --from F770W --to-gauss 7.5
+    python -m jwst_kernels.make_kernels --from F770W --to-gauss 7.5 \
+        --config config.toml
 
-    # With overwrite
-    python -m jwst_kernels.make_kernels --from F444W --to-gauss 15 --overwrite
+    # With overwrite, using explicit paths
+    python -m jwst_kernels.make_kernels --from F444W --to-gauss 15 \
+        --psf-dir /path/to/psfs --kernel-dir /path/to/kernels --overwrite
 
 Aniano-processed PSF Usage
 --------------------------
 Generate Aniano-processed source PSFs (no kernel):
 
     # Single band, default variant (circ_filt)
-    python -m jwst_kernels.make_kernels --from F335M --just-processed-psf
-    python -m jwst_kernels.make_kernels --from F770W --just-processed-psf -o
+    python -m jwst_kernels.make_kernels --from F335M --just-processed-psf \
+        --config config.toml
+    python -m jwst_kernels.make_kernels --from F770W --just-processed-psf -o \
+        --config config.toml
 
     # Single band, all three variants in one shot
     python -m jwst_kernels.make_kernels --from F335M --just-processed-psf \
+        --config config.toml \
         --psf-variants circ_filt,circ_nofilt,nocirc_filt
 
     # Batch all MIRI bands (default variant)
-    python -m jwst_kernels.make_kernels miri --just-processed-psf -j 8
+    python -m jwst_kernels.make_kernels miri --just-processed-psf \
+        --config config.toml -j 8
 
     # Batch all bands, only the un-circularized Fourier-filtered variant
-    python -m jwst_kernels.make_kernels all --just-processed-psf -j 8 \
-        --psf-variants nocirc_filt
+    python -m jwst_kernels.make_kernels all --just-processed-psf \
+        --config config.toml -j 8 --psf-variants nocirc_filt
 
 Output
 ------
@@ -106,15 +131,14 @@ import argparse
 import multiprocessing as mp
 from functools import partial
 
-from jwst_kernels.make_kernels_original import (
+from jwst_kernels.evaluate_kernels import find_safe_kernel, plot_evaluate
+from jwst_kernels.make_psf import read_PSF
+from jwst_kernels.kernel_core import (
+    MakeConvolutionKernel,
     make_jwst_cross_kernel,
     make_jwst_kernel_to_Gauss,
     plot_kernel,
 )
-from jwst_kernels.evaluate_kernels import find_safe_kernel, plot_evaluate
-
-from jwst_kernels.make_psf import read_PSF
-from jwst_kernels.kernel_core import MakeConvolutionKernel
 
 __all__ = [
     "make_jwst_cross_kernel",
