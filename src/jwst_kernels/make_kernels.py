@@ -2,7 +2,7 @@
 """JWST PSF Matching Kernel Generator
 ===================================
 
-Generate PSF matching kernels for JWST MIRI and NIRCam instruments.
+Generate PSF matching kernels for JWST MIRI and NIRCam.
 
 Features
 --------
@@ -37,7 +37,7 @@ Directory Configuration
 -----------------------
 Every invocation of the CLI needs both an input PSF directory and an output
 kernel directory. Supply them either directly via ``--psf-dir`` and
-``--kernel-dir``, or via a TOML config file via ``--config``:
+``--kernel-dir``, or via a TOML config file via ``--config`` with contents like:
 
     # config.toml
     psf_dir    = "/path/to/psfs/"
@@ -164,10 +164,8 @@ target_gauss_fwhm_list = [0.35, 0.9, 4, 7.5, 15]
 # Each variant pairs a real-space circularization flag and a Fourier-domain
 # high-pass filter flag, and picks a distinct filename suffix so all three
 # variants can coexist on disk.
-# The `circ_filt` suffix is kept as `aniano_processed` for backwards-compat
-# with previously generated files.
 PSF_VARIANTS = {
-    "circ_filt":   {"do_circularize": True,  "do_fourier_filter": True,  "suffix": "aniano_processed"},
+    "circ_filt":   {"do_circularize": True,  "do_fourier_filter": True,  "suffix": "aniano_circ_filt"},
     "circ_nofilt": {"do_circularize": True,  "do_fourier_filter": False, "suffix": "aniano_circ_nofilt"},
     "nocirc_filt": {"do_circularize": False, "do_fourier_filter": True,  "suffix": "aniano_nocirc_filt"},
 }
@@ -862,7 +860,7 @@ def make_single_gaussian_kernel(
     print(f"✓ Kernel created successfully")
 
 def make_aniano_processed_psf(band, psf_dir, outdir, camera=None,
-                              overwrite=False, filename_suffix='aniano_processed',
+                              overwrite=False, filename_suffix='aniano_circ_filt',
                               do_circularize=True, do_fourier_filter=True,
                               **kwargs):
     """Generate an Aniano-processed PSF for a given band.
@@ -886,7 +884,7 @@ def make_aniano_processed_psf(band, psf_dir, outdir, camera=None,
     overwrite : bool
         Whether to overwrite an existing output file.
     filename_suffix : str
-        Suffix for the output filename (default: 'aniano_processed').
+        Suffix for the output filename (default: 'aniano_circ_filt').
     do_circularize : bool
         If True (default), apply the real-space rotate-and-average circularize
         step during spatial processing. If False, skip it.

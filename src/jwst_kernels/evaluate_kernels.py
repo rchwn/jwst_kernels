@@ -107,4 +107,3 @@ if __name__ == "__main__":
     
     plot_evaluate(out['source_fwhm'], out['target_fwhm'], out['D_v'], out['Wm_v'] )
 
-#%%

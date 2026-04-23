@@ -740,7 +740,7 @@ class MakeConvolutionKernel:
         self.kernel = circularize(self.kernel)
         self.kernel /= np.nanmax(self.kernel)
 
-    def save_processed_psf(self, outdir, which='source', filename_suffix='aniano_processed'):
+    def save_processed_psf(self, outdir, which='source', filename_suffix='aniano_circ_filt'):
         """Save a processed PSF to a FITS file.
 
         Args:
