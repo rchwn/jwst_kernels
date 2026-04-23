@@ -38,47 +38,47 @@ Batch Processing Usage
 Process predefined sets of kernels in parallel:
 
     # Process all MIRI bands to Gaussian kernels (4", 7.5", 15")
-    python make_kernels_rerun.py miri -j 8
+    python -m jwst_kernels.make_kernels miri -j 8
 
     # Process all NIRCam bands to Gaussian kernels
-    python make_kernels_rerun.py nircam -j 8
+    python -m jwst_kernels.make_kernels nircam -j 8
 
     # Process NIRCam to F770W cross kernels
-    python make_kernels_rerun.py cross -j 8
+    python -m jwst_kernels.make_kernels cross -j 8
 
     # Process everything
-    python make_kernels_rerun.py all -j 8 --overwrite
+    python -m jwst_kernels.make_kernels all -j 8 --overwrite
 
 Single Kernel Usage
 -------------------
 Generate individual kernels on demand:
 
     # Cross kernel: NIRCam F200W to MIRI F770W
-    python make_kernels_rerun.py --from F200W --to F770W
+    python -m jwst_kernels.make_kernels --from F200W --to F770W
 
     # Gaussian kernel: MIRI F770W to 7.5" Gaussian
-    python make_kernels_rerun.py --from F770W --to-gauss 7.5
+    python -m jwst_kernels.make_kernels --from F770W --to-gauss 7.5
 
     # With overwrite
-    python make_kernels_rerun.py --from F444W --to-gauss 15 --overwrite
+    python -m jwst_kernels.make_kernels --from F444W --to-gauss 15 --overwrite
 
 Aniano-processed PSF Usage
 --------------------------
 Generate Aniano-processed source PSFs (no kernel):
 
     # Single band, default variant (circ_filt)
-    python make_kernels_rerun.py --from F335M --just-processed-psf
-    python make_kernels_rerun.py --from F770W --just-processed-psf -o
+    python -m jwst_kernels.make_kernels --from F335M --just-processed-psf
+    python -m jwst_kernels.make_kernels --from F770W --just-processed-psf -o
 
     # Single band, all three variants in one shot
-    python make_kernels_rerun.py --from F335M --just-processed-psf \
+    python -m jwst_kernels.make_kernels --from F335M --just-processed-psf \
         --psf-variants circ_filt,circ_nofilt,nocirc_filt
 
     # Batch all MIRI bands (default variant)
-    python make_kernels_rerun.py miri --just-processed-psf -j 8
+    python -m jwst_kernels.make_kernels miri --just-processed-psf -j 8
 
     # Batch all bands, only the un-circularized Fourier-filtered variant
-    python make_kernels_rerun.py all --just-processed-psf -j 8 \
+    python -m jwst_kernels.make_kernels all --just-processed-psf -j 8 \
         --psf-variants nocirc_filt
 
 Output
