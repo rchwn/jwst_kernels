@@ -577,8 +577,7 @@ class MakeConvolutionKernel:
             * ``do_circularize=False, do_fourier_filter=False`` -> spatial processing only
               (interp NaNs, resample, centroid, resize, normalize). Neither the real-space
               rotate-and-average circularize nor the Fourier-domain circularize + high-pass
-              filter block is applied. Useful for diagnostics where you want the asymmetric,
-              unfiltered PSF on the common pixel grid.
+              filter block is applied. 
 
         If common_pixscale is None, defaults to source_pixscale (no resample).
         If grid_size_arcsec is None, defaults to the source PSF's native grid
