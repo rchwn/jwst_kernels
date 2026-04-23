@@ -171,46 +171,18 @@ PSF_VARIANTS = {
 }
 DEFAULT_PSF_VARIANT = "circ_filt"
 
-# All MIRI bands
-miri_bands = [
-    'F560W',
-    'F770W',
-    'F1000W',
-    'F1130W',
-    'F1280W',
-    'F1500W',
-    'F1800W',
-    'F2100W',
-    'F2550W',
+# All JWST bands (ascending wavelength order)
+MIRI_BANDS = [
+    'F560W', 'F770W', 'F1000W', 'F1065C', 'F1130W', 'F1140C', 'F1280W',
+    'F1500W', 'F1550C', 'F1800W', 'F2100W', 'F2300C', 'F2550W', 'FND',
 ]
 
-# NIRCam bands
-nircam_bands = [
-    'F090W',
-    'F150W',
-    'F187N',
-    'F200W',
-    'F300M',
-    'F335M',
-    'F164N',
-    'F212N',
-    'F277W',
-    'F360M',
-    'F444W',
-    'F405N',
-    'F430M',
+NIRCAM_BANDS = [
+    'F070W', 'F090W', 'F115W', 'F140M', 'F150W', 'F150W2', 'F162M', 'F164N',
+    'F182M', 'F187N', 'F200W', 'F210M', 'F212N', 'F250M', 'F277W', 'F300M',
+    'F322W2', 'F323N', 'F335M', 'F356W', 'F360M', 'F405N', 'F410M', 'F430M',
+    'F444W', 'F460M', 'F466N', 'F470N', 'F480M',
 ]
-
-# All JWST bands
-MIRI_BANDS = ['F560W', 'F770W', 'F1000W', 'F1130W', 'F1280W', 'F1500W', 
-              'F1800W', 'F2100W', 'F2550W', 'F1065C', 'F1140C', 'F1550C', 
-              'F2300C', 'FND']
-
-NIRCAM_BANDS = ['F070W', 'F090W', 'F115W', 'F140M', 'F150W', 'F150W2', 
-                'F162M', 'F164N', 'F182M', 'F187N', 'F200W', 'F210M', 
-                'F212N', 'F250M', 'F277W', 'F300M', 'F322W2', 'F323N', 
-                'F335M', 'F356W', 'F360M', 'F405N', 'F410M', 'F430M', 
-                'F444W', 'F460M', 'F466N', 'F470N', 'F480M']
 
 def detect_camera(band):
     """
@@ -501,7 +473,7 @@ def process_miri_gauss(
     
     # Create tasks for all MIRI kernels
     tasks = []
-    for filt in miri_bands:
+    for filt in MIRI_BANDS:
         for fwhm in target_gauss_fwhm_list:
             tasks.append(('MIRI', filt, fwhm,
                           psf_dir, outdir, overwrite))
@@ -543,7 +515,7 @@ def process_nircam_gauss(
     
     # Create tasks for all NIRCam kernels
     tasks = []
-    for filt in nircam_bands:
+    for filt in NIRCAM_BANDS:
         for fwhm in target_gauss_fwhm_list:
             tasks.append(('NIRCam', filt, fwhm, psf_dir, outdir, overwrite))
     
@@ -584,8 +556,8 @@ def process_miri_cross(
 
     # Create tasks for all cross kernels
     tasks = []
-    for ii, from_filt in enumerate(miri_bands):
-        for jj, to_filt in enumerate(miri_bands[ii+1:]):
+    for ii, from_filt in enumerate(MIRI_BANDS):
+        for jj, to_filt in enumerate(MIRI_BANDS[ii+1:]):
             tasks.append((from_filt, to_filt, psf_dir,
                           outdir, overwrite))
     
@@ -626,8 +598,8 @@ def process_nircam_cross(
         
     # Create tasks for all cross kernels
     tasks = []
-    for ii, from_filt in enumerate(nircam_bands):
-        for jj, to_filt in enumerate(nircam_bands[ii+1:]):
+    for ii, from_filt in enumerate(NIRCAM_BANDS):
+        for jj, to_filt in enumerate(NIRCAM_BANDS[ii+1:]):
             tasks.append((from_filt, to_filt, psf_dir,
                           outdir, overwrite))
     
@@ -670,8 +642,8 @@ def process_cross_instrument(
     tasks = []
     # Create tasks for all cross kernels
     tasks = []
-    for ii, from_filt in enumerate(nircam_bands):
-        for jj, to_filt in enumerate(miri_bands):
+    for ii, from_filt in enumerate(NIRCAM_BANDS):
+        for jj, to_filt in enumerate(MIRI_BANDS):
             tasks.append((from_filt, to_filt, psf_dir,
                           outdir, overwrite))
     
@@ -1143,11 +1115,11 @@ Aniano-processed PSF Examples:
     if args.just_processed_psf:
         bands = []
         if 'miri' in cameras:
-            bands += miri_bands
+            bands += MIRI_BANDS
         if 'nircam' in cameras:
-            bands += nircam_bands
+            bands += NIRCAM_BANDS
         if 'cross' in cameras and 'miri' not in cameras and 'nircam' not in cameras:
-            bands += miri_bands + nircam_bands
+            bands += MIRI_BANDS + NIRCAM_BANDS
         process_aniano_psfs(
             bands=bands, n_procs=n_procs,
             psf_dir=psf_dir, outdir=outdir,
