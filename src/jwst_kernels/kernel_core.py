@@ -1,5 +1,5 @@
 """
-Uses the Aniano algorithm to generate kernels given a sorce and target PSF
+Uses the Aniano algorithm to generate kernels given a source and target PSF
 
 @author: williams, belfiore
 """
@@ -29,7 +29,11 @@ def profile(psf,bins=None, pixscale=1):
     if bins is None:
         guess_sigma = np.sum(ii[:,int(i_cen)]**2*psf[:,int(i_cen)]/np.sum(psf[:,int(i_cen)]))**0.5*pixscale
         extent = np.min([psf.shape[0]/2*pixscale, guess_sigma*5])
-        bins = np.linspace(0, int(extent), int(extent/pixscale/2))
+        # int(extent) here used to truncate the bin range to 0 for any
+        # sub-arcsec PSF, which made the radial profile (and get_fwhm)
+        # silently return zeros. Keep the upper bound in floating point.
+        n_bins = max(int(extent/pixscale/2), 8)
+        bins = np.linspace(0, extent, n_bins)
             
  
     bin_means = (np.histogram(dis, bins, weights=psf)[0] /
@@ -890,7 +894,8 @@ class MakeConvolutionKernel:
 def make_jwst_cross_kernel(input_filter, target_filter, psf_dir=None,
                            outdir=None, save_kernel=False,
                            common_pixscale=None, detector_effects=True,
-                           naming_convention='PHANGS', verbose=False):
+                           naming_convention='PHANGS', verbose=False,
+                           save_plots=False, plot_dir=None):
     """Generate the kernel that matches a JWST input filter to a target JWST filter.
 
     Works for both MIRI and NIRCam. If the source or target raw PSF is not
@@ -911,6 +916,12 @@ def make_jwst_cross_kernel(input_filter, target_filter, psf_dir=None,
         Whether to pull the ``OVERDIST`` extension (detector effects on).
     naming_convention : str
         Filename convention passed through to ``write_out_kernel``.
+    save_plots : bool
+        If True, also write a diagnostic PNG via
+        :func:`jwst_kernels.evaluate_kernels.plot_kernel_diagnostic`.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs. Defaults to ``<outdir>/plots`` when
+        ``save_plots=True`` and ``plot_dir`` is None.
 
     Returns
     -------
@@ -945,6 +956,13 @@ def make_jwst_cross_kernel(input_filter, target_filter, psf_dir=None,
     if save_kernel:
         kk.write_out_kernel(outdir=outdir, add_keys=dict_extension,
                             naming_convention=naming_convention)
+
+    if save_plots:
+        from jwst_kernels.evaluate_kernels import plot_kernel_diagnostic
+        if plot_dir is None:
+            plot_dir = os.path.join(str(outdir), 'plots')
+        plot_kernel_diagnostic(kk, plot_dir=plot_dir)
+
     return kk
 
 
@@ -952,7 +970,8 @@ def make_jwst_kernel_to_Gauss(input_filter, target_gaussian, psf_dir=None,
                               outdir=None, save_kernel=False,
                               detector_effects=True,
                               naming_convention='PHANGS', verbose=False,
-                              size_kernel_asec=None):
+                              size_kernel_asec=None,
+                              save_plots=False, plot_dir=None):
     """Generate the kernel that matches a JWST filter PSF to a Gaussian target.
 
     Parameters
@@ -967,6 +986,12 @@ def make_jwst_kernel_to_Gauss(input_filter, target_gaussian, psf_dir=None,
     naming_convention : str
     size_kernel_asec : float, optional
         Override the auto-chosen kernel footprint (arcsec).
+    save_plots : bool
+        If True, also write a diagnostic PNG via
+        :func:`jwst_kernels.evaluate_kernels.plot_kernel_diagnostic`.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs. Defaults to ``<outdir>/plots`` when
+        ``save_plots=True`` and ``plot_dir`` is None.
 
     Returns
     -------
@@ -1018,6 +1043,13 @@ def make_jwst_kernel_to_Gauss(input_filter, target_gaussian, psf_dir=None,
     if save_kernel:
         kk.write_out_kernel(outdir=outdir, add_keys=dict_extension,
                             naming_convention=naming_convention)
+
+    if save_plots:
+        from jwst_kernels.evaluate_kernels import plot_kernel_diagnostic
+        if plot_dir is None:
+            plot_dir = os.path.join(str(outdir), 'plots')
+        plot_kernel_diagnostic(kk, plot_dir=plot_dir)
+
     return kk
 
 

@@ -21,6 +21,13 @@ Features
   variants of the same band (default: nocirc_nofilt -> circ_filt; configure
   with --from-variant / --to-variant). Reads processed PSFs from the output
   directory and regenerates any missing ones.
+- Composite-PSF -> Gaussian kernel generation (--from-composite NAME
+  --to-gauss FWHM). The composite is auto-built from composites.toml if
+  missing.
+- Diagnostic kernel plots (--save-plots) for every kernel that gets
+  created (any mode): a 2x2 PNG showing the source PSF, target PSF, the
+  kernel itself, and radial profiles annotated with Aniano D / W_-
+  performance measures.
 - Parallel processing with multiprocessing
 
 Requirements
@@ -178,6 +185,35 @@ processed-to-processed kernels, all for the selected camera set.
         --from-variant nocirc_filt --to-variant circ_filt \
         --config config.toml -j 8
 
+Composite-PSF -> Gaussian Kernels
+---------------------------------
+Build a matching kernel that takes a saved composite PSF (as defined in
+``composites.toml``, e.g. ``alpha`` = F335M convolved with F300M) to a
+Gaussian target. The composite is auto-built from its definition if
+missing on disk.
+
+    # Single composite -> Gaussian
+    python -m jwst_kernels.make_kernels --from-composite alpha --to-gauss 0.9 \
+        --config config.toml
+
+    # All composites in composites.toml -> 0.9" Gaussian, in parallel
+    python -m jwst_kernels.make_kernels --composite all --to-gauss 0.9 \
+        --config config.toml -j 4
+
+Diagnostic Kernel Plots (--save-plots)
+--------------------------------------
+For every kernel that gets created (any mode), save a 2x2 diagnostic PNG
+showing the source PSF, target PSF, kernel image, and radial profiles
+annotated with Aniano D / W_- statistics.
+
+    # Single Gaussian kernel + plot
+    python -m jwst_kernels.make_kernels --from F335M --to-gauss 0.9 \
+        --config config.toml --save-plots
+
+    # Batch composite -> Gaussian + plots in a custom directory
+    python -m jwst_kernels.make_kernels --composite all --to-gauss 0.9 \
+        --config config.toml -j 4 --save-plots --plot-dir /tmp/kernel_plots
+
 Output
 ------
 Kernels are saved to the configured output directory with naming:
@@ -214,8 +250,12 @@ import argparse
 import multiprocessing as mp
 from functools import partial
 
-from jwst_kernels.evaluate_kernels import find_safe_kernel, plot_evaluate
-from jwst_kernels.make_psf import read_PSF
+from jwst_kernels.evaluate_kernels import (
+    find_safe_kernel,
+    plot_evaluate,
+    plot_kernel_diagnostic,
+)
+from jwst_kernels.make_psf import makeGaussian_2D, read_PSF
 from jwst_kernels.kernel_core import (
     MakeConvolutionKernel,
     get_pixscale,
@@ -228,6 +268,7 @@ __all__ = [
     "make_jwst_cross_kernel",
     "make_jwst_kernel_to_Gauss",
     "plot_kernel",
+    "plot_kernel_diagnostic",
     "find_safe_kernel",
     "plot_evaluate",
     "read_PSF",
@@ -235,6 +276,13 @@ __all__ = [
     "make_aniano_processed_psf",
     "make_processed_to_processed_kernel",
     "PSF_VARIANTS",
+    "load_composites_config",
+    "load_component_psf",
+    "make_composite_psf",
+    "save_composite_psf",
+    "process_composite_psfs",
+    "make_composite_to_Gauss_kernel",
+    "process_composite_gauss",
 ]
 
 # Set the permissions on the output files
@@ -365,24 +413,23 @@ def check_cross_kernel_exists(input_filt, target_filt, psf_dir, outdir):
 def make_gaussian_kernel_worker(task):
     """
     Worker function for parallel Gaussian kernel generation.
-    
+
     Parameters
     ----------
     task : tuple
-        (camera, filt, fwhm, psf_dir, outdir, overwrite)
-    
+        (camera, filt, fwhm, psf_dir, outdir, overwrite, save_plots, plot_dir)
+
     Returns
     -------
     dict
         Result dictionary with status and info
     """
-    camera, filt, fwhm, psf_dir, outdir, overwrite = task
+    camera, filt, fwhm, psf_dir, outdir, overwrite, save_plots, plot_dir = task
 
     try:
-        # Check if kernel already exists
         exists, kernel_file = check_gaussian_kernel_exists(
             filt, fwhm, psf_dir, outdir, camera)
-        
+
         if exists and not overwrite:
             return {
                 'success': True,
@@ -392,10 +439,9 @@ def make_gaussian_kernel_worker(task):
                 'status': 'skipped',
                 'message': f"SKIPPED (exists: {os.path.basename(kernel_file)})"
             }
-        
+
         status = 'overwriting' if exists else 'creating'
-        
-        # Generate the kernel
+
         input_filter = {'camera': camera, 'filter': filt}
         target_gaussian = {'fwhm': fwhm}
         kk = make_jwst_kernel_to_Gauss(input_filter,
@@ -403,8 +449,10 @@ def make_gaussian_kernel_worker(task):
                                        psf_dir=psf_dir,
                                        outdir=outdir,
                                        detector_effects=True,
-                                       save_kernel=True)
-        
+                                       save_kernel=True,
+                                       save_plots=save_plots,
+                                       plot_dir=plot_dir)
+
         return {
             'success': True,
             'camera': camera,
@@ -413,7 +461,7 @@ def make_gaussian_kernel_worker(task):
             'status': status,
             'message': f"{'OVERWRITTEN' if exists else 'CREATED'}"
         }
-        
+
     except Exception as e:
         return {
             'success': False,
@@ -428,23 +476,23 @@ def make_gaussian_kernel_worker(task):
 def make_cross_kernel_worker(task):
     """
     Worker function for parallel cross kernel generation.
-    
+
     Parameters
     ----------
     task : tuple
-        (input_filt, target_filt, psf_dir, outdir, overwrite)
-    
+        (input_filt, target_filt, psf_dir, outdir, overwrite, save_plots, plot_dir)
+
     Returns
     -------
     dict
         Result dictionary with status and info
     """
-    input_filt, target_filt, psf_dir, outdir, overwrite = task
-    
+    (input_filt, target_filt, psf_dir, outdir, overwrite,
+     save_plots, plot_dir) = task
+
     try:
-        # Check if kernel already exists
         exists, kernel_file = check_cross_kernel_exists(input_filt, target_filt, psf_dir, outdir)
-        
+
         if exists and not overwrite:
             return {
                 'success': True,
@@ -453,10 +501,9 @@ def make_cross_kernel_worker(task):
                 'status': 'skipped',
                 'message': f"SKIPPED (exists: {os.path.basename(kernel_file)})"
             }
-        
+
         status = 'overwriting' if exists else 'creating'
-        
-        # Generate the kernel
+
         input_filter = {'camera': detect_camera(input_filt),
                         'filter': input_filt}
         target_filter = {'camera': detect_camera(target_filt),
@@ -466,8 +513,10 @@ def make_cross_kernel_worker(task):
                                     psf_dir=psf_dir,
                                     outdir=outdir,
                                     detector_effects=True,
-                                    save_kernel=True)
-        
+                                    save_kernel=True,
+                                    save_plots=save_plots,
+                                    plot_dir=plot_dir)
+
         return {
             'success': True,
             'input_filt': input_filt,
@@ -475,7 +524,7 @@ def make_cross_kernel_worker(task):
             'status': status,
             'message': f"{'OVERWRITTEN' if exists else 'CREATED'}"
         }
-        
+
     except Exception as e:
         return {
             'success': False,
@@ -546,23 +595,28 @@ def make_aniano_psf_worker(task):
 
 
 def process_miri_gauss(
-        n_procs=1, psf_dir=None, outdir=None, overwrite=False):
+        n_procs=1, psf_dir=None, outdir=None, overwrite=False,
+        save_plots=False, plot_dir=None):
     """Process MIRI bands to Gaussian kernels
-    
+
     Parameters
     ----------
     n_procs : int
         Number of parallel processes to use
+    save_plots : bool
+        If True, also write a diagnostic PNG for each kernel.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs.
     """
     print("\n=== Processing MIRI to Gaussian ===")
     print(f"Using {n_procs} parallel processes")
-    
-    # Create tasks for all MIRI kernels
+
     tasks = []
     for filt in MIRI_BANDS:
         for fwhm in target_gauss_fwhm_list:
             tasks.append(('MIRI', filt, fwhm,
-                          psf_dir, outdir, overwrite))
+                          psf_dir, outdir, overwrite,
+                          save_plots, plot_dir))
     
     print(f"Total tasks: {len(tasks)}")
     
@@ -588,22 +642,27 @@ def process_miri_gauss(
     print(f"\nMIRI Gaussian summary: {created} created, {skipped} skipped, {errors} errors")
     
 def process_nircam_gauss(
-        n_procs=1, psf_dir=None, outdir=None, overwrite=False):
+        n_procs=1, psf_dir=None, outdir=None, overwrite=False,
+        save_plots=False, plot_dir=None):
     """Process NIRCam bands to Gaussian kernels
-    
+
     Parameters
     ----------
     n_procs : int
         Number of parallel processes to use
+    save_plots : bool
+        If True, also write a diagnostic PNG for each kernel.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs.
     """
     print("\n=== Processing NIRCam bands ===")
     print(f"Using {n_procs} parallel processes")
-    
-    # Create tasks for all NIRCam kernels
+
     tasks = []
     for filt in NIRCAM_BANDS:
         for fwhm in target_gauss_fwhm_list:
-            tasks.append(('NIRCam', filt, fwhm, psf_dir, outdir, overwrite))
+            tasks.append(('NIRCam', filt, fwhm, psf_dir, outdir, overwrite,
+                          save_plots, plot_dir))
     
     print(f"Total tasks: {len(tasks)}")
     
@@ -629,7 +688,8 @@ def process_nircam_gauss(
     print(f"\nNIRCam Summary: {created} created, {skipped} skipped, {errors} errors")
 
 def process_miri_cross(
-        n_procs=1, psf_dir=None, outdir=None, overwrite=False):
+        n_procs=1, psf_dir=None, outdir=None, overwrite=False,
+        save_plots=False, plot_dir=None):
     """Process MIRI to MIRI cross kernels.
 
     Only generates kernels from shorter-wavelength MIRI bands to
@@ -641,16 +701,19 @@ def process_miri_cross(
     ----------
     n_procs : int
         Number of parallel processes to use
+    save_plots : bool
+        If True, also write a diagnostic PNG for each kernel.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs.
     """
     print("\n=== Processing MIRI to MIRI cross kernels ===")
     print(f"Using {n_procs} parallel processes")
 
-    # Create tasks for all cross kernels
     tasks = []
     for ii, from_filt in enumerate(MIRI_BANDS):
         for jj, to_filt in enumerate(MIRI_BANDS[ii+1:]):
             tasks.append((from_filt, to_filt, psf_dir,
-                          outdir, overwrite))
+                          outdir, overwrite, save_plots, plot_dir))
     
     print(f"Total tasks: {len(tasks)}")
     
@@ -676,7 +739,8 @@ def process_miri_cross(
     print(f"\nMIRI cross kernels Summary: {created} created, {skipped} skipped, {errors} errors")
 
 def process_nircam_cross(
-        n_procs=1, psf_dir=None, outdir=None, overwrite=False):
+        n_procs=1, psf_dir=None, outdir=None, overwrite=False,
+        save_plots=False, plot_dir=None):
     """Process NIRCam to NIRCam cross kernels.
 
     Only generates kernels from shorter-wavelength NIRCam bands to
@@ -688,16 +752,19 @@ def process_nircam_cross(
     ----------
     n_procs : int
         Number of parallel processes to use
+    save_plots : bool
+        If True, also write a diagnostic PNG for each kernel.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs.
     """
     print("\n=== Processing NIRCam to NIRCam cross kernels ===")
     print(f"Using {n_procs} parallel processes")
-        
-    # Create tasks for all cross kernels
+
     tasks = []
     for ii, from_filt in enumerate(NIRCAM_BANDS):
         for jj, to_filt in enumerate(NIRCAM_BANDS[ii+1:]):
             tasks.append((from_filt, to_filt, psf_dir,
-                          outdir, overwrite))
+                          outdir, overwrite, save_plots, plot_dir))
     
     print(f"Total tasks: {len(tasks)}")
     
@@ -723,7 +790,8 @@ def process_nircam_cross(
     print(f"\n NIRCam cross kernels Summary: {created} created, {skipped} skipped, {errors} errors")
     
 def process_cross_instrument(
-        n_procs=1, psf_dir=None, outdir=None, overwrite=False):
+        n_procs=1, psf_dir=None, outdir=None, overwrite=False,
+        save_plots=False, plot_dir=None):
     """Process NIRCam to MIRI cross kernels.
 
     Generates kernels from every NIRCam band to every MIRI band. Because
@@ -735,18 +803,19 @@ def process_cross_instrument(
     ----------
     n_procs : int
         Number of parallel processes to use
+    save_plots : bool
+        If True, also write a diagnostic PNG for each kernel.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs.
     """
     print("\n=== Processing NIRCam to MIRI cross kernels ===")
     print(f"Using {n_procs} parallel processes")
 
-    # Create tasks for all cross kernels
-    tasks = []
-    # Create tasks for all cross kernels
     tasks = []
     for ii, from_filt in enumerate(NIRCAM_BANDS):
         for jj, to_filt in enumerate(MIRI_BANDS):
             tasks.append((from_filt, to_filt, psf_dir,
-                          outdir, overwrite))
+                          outdir, overwrite, save_plots, plot_dir))
     
     print(f"Total tasks: {len(tasks)}")
     
@@ -836,10 +905,10 @@ def process_aniano_psfs(
 def make_single_cross_kernel(
         from_band, to_band,
         psf_dir=None, outdir=None,
-        overwrite=False):
+        overwrite=False, save_plots=False, plot_dir=None):
     """
     Generate a single cross kernel from one band to another.
-    
+
     Parameters
     ----------
     from_band : str
@@ -852,16 +921,18 @@ def make_single_cross_kernel(
         Directory where kernels are stored
     overwrite : bool
         Whether to overwrite if exists
+    save_plots : bool
+        If True, also write a diagnostic PNG for the kernel.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs.
     """
     print(f"\n=== Creating cross kernel: {from_band} -> {to_band} ===")
-    
-    # Auto-detect cameras
+
     from_camera = detect_camera(from_band)
     to_camera = detect_camera(to_band)
-    
+
     print(f"Detected: {from_band} ({from_camera}) -> {to_band} ({to_camera})")
-    
-    # Check if exists
+
     exists, kernel_file = check_cross_kernel_exists(from_band, to_band, psf_dir, outdir)
     if exists and not overwrite:
         print(f"Kernel already exists: {kernel_file}")
@@ -869,26 +940,28 @@ def make_single_cross_kernel(
         return
     elif exists:
         print(f"Overwriting existing kernel: {kernel_file}")
-    
-    # Generate kernel
+
     input_filter = {'camera': from_camera, 'filter': from_band}
     target_filter = {'camera': to_camera, 'filter': to_band}
-    
+
     print("Generating kernel...")
     kk = make_jwst_cross_kernel(input_filter,
                                 target_filter,
                                 psf_dir=psf_dir,
                                 outdir=outdir,
                                 detector_effects=True,
-                                save_kernel=True)
-    
-    print(f"✓ Kernel created successfully")
+                                save_kernel=True,
+                                save_plots=save_plots,
+                                plot_dir=plot_dir)
+
+    print(f"Kernel created successfully")
 
 def make_single_gaussian_kernel(
-        from_band, fwhm, psf_dir=None, outdir=None, overwrite=False):
+        from_band, fwhm, psf_dir=None, outdir=None, overwrite=False,
+        save_plots=False, plot_dir=None):
     """
     Generate a single Gaussian kernel from a band to a Gaussian PSF.
-    
+
     Parameters
     ----------
     from_band : str
@@ -901,15 +974,17 @@ def make_single_gaussian_kernel(
         Directory where kernels are stored
     overwrite : bool
         Whether to overwrite if exists
+    save_plots : bool
+        If True, also write a diagnostic PNG for the kernel.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs.
     """
     print(f"\n=== Creating Gaussian kernel: {from_band} -> Gaussian {fwhm}\" ===")
-    
-    # Auto-detect camera
+
     camera = detect_camera(from_band)
-    
+
     print(f"Detected: {from_band} ({camera}) -> Gaussian FWHM = {fwhm} arcsec")
-    
-    # Check if exists
+
     exists, kernel_file = check_gaussian_kernel_exists(from_band, fwhm, psf_dir, outdir, camera)
     if exists and not overwrite:
         print(f"Kernel already exists: {kernel_file}")
@@ -917,20 +992,21 @@ def make_single_gaussian_kernel(
         return
     elif exists:
         print(f"Overwriting existing kernel: {kernel_file}")
-    
-    # Generate kernel
+
     input_filter = {'camera': camera, 'filter': from_band}
     target_gaussian = {'fwhm': fwhm}
-    
+
     print("Generating kernel...")
     kk = make_jwst_kernel_to_Gauss(input_filter,
                                    target_gaussian,
                                    psf_dir=psf_dir,
                                    outdir=outdir,
                                    detector_effects=True,
-                                   save_kernel=True)
-    
-    print(f"✓ Kernel created successfully")
+                                   save_kernel=True,
+                                   save_plots=save_plots,
+                                   plot_dir=plot_dir)
+
+    print(f"Kernel created successfully")
 
 def make_aniano_processed_psf(band, psf_dir, outdir, camera=None,
                               overwrite=False, filename_suffix='aniano_circ_filt',
@@ -1071,7 +1147,7 @@ def _ensure_processed_psf(band, variant_key, psf_dir, outdir, camera=None,
 def make_processed_to_processed_kernel(
         band, from_variant='nocirc_nofilt', to_variant='circ_filt',
         psf_dir=None, outdir=None, overwrite=False, save_kernel=True,
-        verbose=False, **kwargs):
+        verbose=False, save_plots=False, plot_dir=None, **kwargs):
     """Generate a matching kernel between two processed PSF variants of the same band.
 
     Reads (or regenerates on demand) ``{band}_{from_suffix}.fits`` and
@@ -1100,6 +1176,12 @@ def make_processed_to_processed_kernel(
         Whether to write the kernel FITS file.
     verbose : bool
         Passed through to :class:`MakeConvolutionKernel`.
+    save_plots : bool
+        If True, also write a diagnostic PNG via
+        :func:`jwst_kernels.evaluate_kernels.plot_kernel_diagnostic`.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs. Defaults to ``<outdir>/plots`` when
+        ``save_plots=True`` and ``plot_dir`` is None.
     **kwargs
         Forwarded to :func:`make_aniano_processed_psf` when regenerating
         missing processed PSFs (e.g. ``oversample_factor``).
@@ -1192,6 +1274,12 @@ def make_processed_to_processed_kernel(
                             naming_convention='PHANGS', print_name=True)
     else:
         print("Kernel not saved")
+
+    if save_plots:
+        if plot_dir is None:
+            plot_dir = os.path.join(str(outdir), 'plots')
+        plot_kernel_diagnostic(kk, plot_dir=plot_dir)
+
     return kk
 
 
@@ -1217,14 +1305,16 @@ def make_processed_kernel_worker(task):
     Parameters
     ----------
     task : tuple
-        (band, psf_dir, outdir, overwrite, from_variant, to_variant)
+        (band, psf_dir, outdir, overwrite, from_variant, to_variant,
+         save_plots, plot_dir)
 
     Returns
     -------
     dict
         Result dictionary with status and info.
     """
-    band, psf_dir, outdir, overwrite, from_variant, to_variant = task
+    (band, psf_dir, outdir, overwrite, from_variant, to_variant,
+     save_plots, plot_dir) = task
 
     try:
         exists, kernel_file = check_processed_kernel_exists(
@@ -1246,6 +1336,7 @@ def make_processed_kernel_worker(task):
             band, from_variant=from_variant, to_variant=to_variant,
             psf_dir=psf_dir, outdir=outdir, overwrite=overwrite,
             save_kernel=True,
+            save_plots=save_plots, plot_dir=plot_dir,
         )
 
         return {
@@ -1270,7 +1361,8 @@ def make_processed_kernel_worker(task):
 
 def process_processed_kernels(
         bands, n_procs=1, psf_dir=None, outdir=None, overwrite=False,
-        from_variant='nocirc_nofilt', to_variant='circ_filt'):
+        from_variant='nocirc_nofilt', to_variant='circ_filt',
+        save_plots=False, plot_dir=None):
     """Batch-process processed-to-processed kernels for a list of bands.
 
     Parameters
@@ -1285,6 +1377,10 @@ def process_processed_kernels(
         Whether to overwrite existing processed PSFs and kernels.
     from_variant, to_variant : str
         Keys into :data:`PSF_VARIANTS`.
+    save_plots : bool
+        If True, also write a diagnostic PNG for each kernel.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs.
     """
     if from_variant not in PSF_VARIANTS:
         raise ValueError(
@@ -1306,7 +1402,8 @@ def process_processed_kernels(
     print(f"Variants: {from_variant} -> {to_variant}")
 
     tasks = [
-        (band, psf_dir, outdir, overwrite, from_variant, to_variant)
+        (band, psf_dir, outdir, overwrite, from_variant, to_variant,
+         save_plots, plot_dir)
         for band in bands
     ]
 
@@ -1328,6 +1425,653 @@ def process_processed_kernels(
         print(f"  {band} [{from_variant} -> {to_variant}]: {msg}")
 
     print(f"\nProcessed-to-processed kernel summary: "
+          f"{created} created, {skipped} skipped, {errors} errors")
+
+
+# =============================================================================
+# COMPOSITE PSF FUNCTIONS
+# =============================================================================
+
+def load_composites_config(config_path):
+    """Load composite PSF definitions from a TOML file.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to the composites.toml file.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping composite names to their definitions.
+        Each definition has 'components' (list) and optional 'description' (str).
+
+    Raises
+    ------
+    FileNotFoundError
+        If the config file does not exist.
+    ValueError
+        If the TOML file is malformed or missing required fields.
+    """
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(f"Composites config not found: {config_path}")
+
+    with open(config_path, "rb") as f:
+        composites = tomllib.load(f)
+
+    for name, recipe in composites.items():
+        if "components" not in recipe:
+            raise ValueError(
+                f"Composite '{name}' missing required 'components' field"
+            )
+        if not isinstance(recipe["components"], list) or len(recipe["components"]) < 2:
+            raise ValueError(
+                f"Composite '{name}' must have at least 2 components"
+            )
+        for i, comp in enumerate(recipe["components"]):
+            if "name" not in comp and ("band" not in comp or "variant" not in comp):
+                raise ValueError(
+                    f"Composite '{name}' component {i}: must have either "
+                    "'name' (composite ref) or 'band'+'variant' (processed PSF)"
+                )
+
+    return composites
+
+
+def load_component_psf(component, composites, psf_dir, outdir, overwrite=False,
+                       _loading_stack=None):
+    """Load a single component PSF (processed band or composite reference).
+
+    Parameters
+    ----------
+    component : dict
+        Component specification. Either:
+        - {"band": "FXXXM", "variant": "circ_nofilt"} for a processed PSF
+        - {"name": "composite_name"} for a reference to another composite
+    composites : dict
+        Full composites configuration (for resolving references).
+    psf_dir : str
+        Directory containing raw PSFs (for regenerating processed PSFs).
+    outdir : str
+        Directory containing processed and composite PSFs.
+    overwrite : bool
+        If True, regenerate missing dependencies.
+    _loading_stack : set, optional
+        Internal use: for keeping track of composite names being loaded to prevent errors.
+
+    Returns
+    -------
+    data : np.ndarray
+        The PSF data array.
+    pixscale : float
+        Pixel scale in arcsec.
+    label : str
+        Human-readable label for this component.
+
+    Raises
+    ------
+    ValueError
+        If the component spec is invalid or a circular reference is detected.
+    FileNotFoundError
+        If the required PSF file cannot be found or generated.
+    """
+    if _loading_stack is None:
+        _loading_stack = set()
+
+    if "name" in component:
+        composite_name = component["name"]
+        if composite_name in _loading_stack:
+            raise ValueError(
+                f"Circular reference detected: {composite_name} references itself "
+                f"(loading stack: {_loading_stack})"
+            )
+        if composite_name not in composites:
+            raise ValueError(
+                f"Unknown composite reference: '{composite_name}'. "
+                f"Available: {sorted(composites.keys())}"
+            )
+
+        composite_file = os.path.join(outdir, f"composite_{composite_name}.fits")
+        if not os.path.isfile(composite_file) or overwrite:
+            print(f"  Building dependency: composite '{composite_name}'")
+            make_composite_psf(
+                composite_name, composites=composites,
+                psf_dir=psf_dir, outdir=outdir,
+                overwrite=overwrite, _loading_stack=_loading_stack,
+            )
+
+        if not os.path.isfile(composite_file):
+            raise FileNotFoundError(
+                f"Composite PSF not found after build attempt: {composite_file}"
+            )
+
+        with fits.open(composite_file) as hdul:
+            data = np.array(hdul[0].data, dtype=float)
+            pixscale = get_pixscale(hdul[0].header)
+
+        return data, pixscale, f"composite_{composite_name}"
+
+    elif "band" in component and "variant" in component:
+        band = component["band"]
+        variant = component["variant"]
+
+        if variant not in PSF_VARIANTS:
+            raise ValueError(
+                f"Unknown variant: '{variant}'. "
+                f"Allowed: {sorted(PSF_VARIANTS.keys())}"
+            )
+
+        camera = detect_camera(band)
+        psf_file = _ensure_processed_psf(
+            band, variant, psf_dir=psf_dir, outdir=outdir,
+            camera=camera, overwrite=overwrite,
+        )
+
+        with fits.open(psf_file) as hdul:
+            data = np.array(hdul[0].data, dtype=float)
+            pixscale = get_pixscale(hdul[0].header)
+
+        suffix = PSF_VARIANTS[variant]["suffix"]
+        return data, pixscale, f"{band}_{suffix}"
+
+    else:
+        raise ValueError(
+            f"Invalid component spec: {component}. "
+            "Must have either 'name' (for composite ref) or "
+            "'band' + 'variant' (for processed PSF)."
+        )
+
+
+def make_composite_psf(name, composites, psf_dir, outdir, overwrite=False,
+                       _loading_stack=None):
+    """Build a composite PSF by convolving its component PSFs.
+
+    Parameters
+    ----------
+    name : str
+        Name of the composite PSF (must be a key in composites).
+    composites : dict
+        Composite PSF definitions loaded from composites.toml.
+    psf_dir : str
+        Directory containing raw PSFs.
+    outdir : str
+        Directory for processed PSFs and output composite PSF.
+    overwrite : bool
+        If True, regenerate even if output exists.
+    _loading_stack : set, optional
+        Internal use: for keeping track of composite names being loaded to prevent errors.
+
+    Returns
+    -------
+    str
+        Path to the saved composite PSF FITS file.
+
+    Raises
+    ------
+    ValueError
+        If the composite name is unknown or components are incompatible.
+    """
+    from scipy.signal import fftconvolve
+
+    if name not in composites:
+        raise ValueError(
+            f"Unknown composite PSF: '{name}'. "
+            f"Available: {sorted(composites.keys())}"
+        )
+
+    if _loading_stack is None:
+        _loading_stack = set()
+    _loading_stack = _loading_stack | {name}
+
+    recipe = composites[name]
+    components = recipe["components"]
+    description = recipe.get("description", "")
+
+    outfile = os.path.join(outdir, f"composite_{name}.fits")
+    if os.path.isfile(outfile) and not overwrite:
+        print(f"Composite PSF already exists: {outfile}")
+        print("Use --overwrite to regenerate")
+        return outfile
+
+    print(f"\n=== Building composite PSF: {name} ===")
+    if description:
+        print(f"Description: {description}")
+    print(f"Components: {len(components)}")
+
+    component_data = []
+    component_labels = []
+    reference_pixscale = None
+    reference_shape = None
+
+    for i, comp in enumerate(components):
+        print(f"  Loading component {i + 1}/{len(components)}: {comp}")
+        data, pixscale, label = load_component_psf(
+            comp, composites=composites,
+            psf_dir=psf_dir, outdir=outdir, overwrite=overwrite,
+            _loading_stack=_loading_stack,
+        )
+
+        if reference_pixscale is None:
+            reference_pixscale = pixscale
+            reference_shape = data.shape
+        else:
+            if not np.isclose(pixscale, reference_pixscale, rtol=1e-6):
+                raise ValueError(
+                    f"Pixel scale mismatch: {label} has pixscale={pixscale}, "
+                    f"expected {reference_pixscale} (from {component_labels[0]})"
+                )
+            if data.shape != reference_shape:
+                raise ValueError(
+                    f"Shape mismatch: {label} has shape={data.shape}, "
+                    f"expected {reference_shape} (from {component_labels[0]})"
+                )
+
+        component_data.append(data)
+        component_labels.append(label)
+
+    print("Convolving components...")
+    composite = component_data[0].copy()
+    for arr in component_data[1:]:
+        composite = fftconvolve(composite, arr, mode='same')
+
+    print("Normalizing to sum=1...")
+    composite /= np.nansum(composite)
+
+    print(f"Composite shape: {composite.shape}")
+    print(f"Composite pixscale: {reference_pixscale} arcsec/pixel")
+
+    saved_path = save_composite_psf(
+        data=composite,
+        pixscale=reference_pixscale,
+        name=name,
+        component_labels=component_labels,
+        description=description,
+        outdir=outdir,
+    )
+
+    print(f"Saved: {saved_path}")
+    return saved_path
+
+
+def save_composite_psf(data, pixscale, name, component_labels, description,
+                       outdir):
+    """Save a composite PSF to a FITS file.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        The composite PSF data array.
+    pixscale : float
+        Pixel scale in arcsec.
+    name : str
+        Name of the composite PSF.
+    component_labels : list[str]
+        Labels of the component PSFs that were convolved.
+    description : str
+        Human-readable description.
+    outdir : str
+        Output directory.
+
+    Returns
+    -------
+    str
+        Path to the saved FITS file.
+    """
+    os.makedirs(outdir, exist_ok=True)
+
+    hdu = fits.PrimaryHDU(data=np.array(data, dtype=np.float32))
+    header = hdu.header
+
+    header['PSFNAME'] = (name, 'Composite PSF name')
+    header['PSFTYPE'] = ('composite', 'PSF type (composite = convolution of PSFs)')
+    header['PIXELSCL'] = (pixscale, 'arcsec/pixel')
+
+    header['CRPIX1'] = (data.shape[1] + 1) / 2
+    header['CRPIX2'] = (data.shape[0] + 1) / 2
+    header['CRVAL1'] = 0.0
+    header['CRVAL2'] = 0.0
+    header['CDELT1'] = -pixscale / 3600
+    header['CDELT2'] = pixscale / 3600
+
+    header['NCOMP'] = (len(component_labels), 'Number of component PSFs')
+    for i, label in enumerate(component_labels, start=1):
+        key = f'COMP{i}'
+        header[key] = (label[:68], f'Component {i} identifier')
+
+    if description:
+        header['DESCRIPT'] = (description[:68], 'Description')
+
+    outfile = os.path.join(outdir, f"composite_{name}.fits")
+    hdu.writeto(outfile, overwrite=True)
+
+    return outfile
+
+
+def process_composite_psfs(names, composites, psf_dir, outdir, overwrite=False):
+    """Batch-process composite PSFs.
+
+    Parameters
+    ----------
+    names : list[str]
+        Composite PSF names to build. Use list(composites.keys()) for all.
+    composites : dict
+        Composite PSF definitions loaded from composites.toml.
+    psf_dir : str
+        Directory containing raw PSFs.
+    outdir : str
+        Directory for output.
+    overwrite : bool
+        Whether to overwrite existing files.
+    """
+    print(f"\n=== Processing composite PSFs ===")
+    print(f"Composites to build: {names}")
+
+    created = 0
+    skipped = 0
+    errors = 0
+
+    for name in names:
+        try:
+            outfile = os.path.join(outdir, f"composite_{name}.fits")
+            existed = os.path.isfile(outfile)
+            make_composite_psf(
+                name, composites=composites,
+                psf_dir=psf_dir, outdir=outdir,
+                overwrite=overwrite,
+            )
+            if existed and not overwrite:
+                skipped += 1
+            else:
+                created += 1
+        except (ValueError, FileNotFoundError) as e:
+            print(f"  ERROR building '{name}': {e}")
+            errors += 1
+
+    print(f"\nComposite PSF summary: {created} created, {skipped} skipped, {errors} errors")
+
+
+def make_composite_to_Gauss_kernel(
+        composite_name, fwhm,
+        composites=None, composites_config=None,
+        psf_dir=None, outdir=None,
+        overwrite=False, save_kernel=True, verbose=False,
+        save_plots=False, plot_dir=None):
+    """Generate a matching kernel from a composite PSF to a Gaussian target.
+
+    Reads (or auto-builds) ``composite_{composite_name}.fits`` from
+    ``outdir``, constructs a centred Gaussian on the same grid (same shape
+    and pixel scale) with the requested FWHM, then runs the Aniano
+    Fourier-domain kernel pipeline (:meth:`MakeConvolutionKernel.make_convolution_kernel_from_processed`).
+    The composite is already centred and normalised on a common pixel grid,
+    and the Gaussian is built to match, so no additional spatial processing
+    is required.
+
+    Parameters
+    ----------
+    composite_name : str
+        Composite PSF name (must be a key in ``composites``).
+    fwhm : float
+        Target Gaussian FWHM in arcsec. Must be larger than the composite's
+        own FWHM (kernel construction cannot sharpen).
+    composites : dict, optional
+        Composite definitions as returned by :func:`load_composites_config`.
+        If None, ``composites_config`` is loaded.
+    composites_config : str, optional
+        Path to ``composites.toml``. Defaults to ``<outdir>/composites.toml``
+        if both ``composites`` and ``composites_config`` are None.
+    psf_dir : str
+        Directory containing raw PSFs (only used if a component processed PSF
+        or the composite itself needs to be regenerated).
+    outdir : str
+        Directory where composite PSFs live and the output kernel is written.
+    overwrite : bool
+        If True, regenerate the composite (and overwrite an existing kernel).
+    save_kernel : bool
+        Whether to write the kernel FITS file.
+    verbose : bool
+        Forwarded to :class:`MakeConvolutionKernel`.
+    save_plots : bool
+        If True, also write a diagnostic PNG via
+        :func:`jwst_kernels.evaluate_kernels.plot_kernel_diagnostic`.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs. Defaults to ``<outdir>/plots`` when
+        ``save_plots=True`` and ``plot_dir`` is None.
+
+    Returns
+    -------
+    MakeConvolutionKernel
+        Kernel object with ``.kernel`` populated.
+    """
+    if psf_dir is None or outdir is None:
+        raise ValueError("psf_dir and outdir must be provided.")
+    if not (fwhm > 0):
+        raise ValueError(f"fwhm must be positive, got {fwhm}")
+
+    if composites is None:
+        if composites_config is None:
+            composites_config = os.path.join(str(outdir), "composites.toml")
+        composites = load_composites_config(composites_config)
+
+    if composite_name not in composites:
+        raise ValueError(
+            f"Unknown composite: '{composite_name}'. "
+            f"Available: {sorted(composites.keys())}"
+        )
+
+    print(f"\n=== Creating composite-to-Gaussian kernel: "
+          f"composite_{composite_name} -> Gaussian {fwhm}\" FWHM ===")
+
+    composite_file = os.path.join(str(outdir), f"composite_{composite_name}.fits")
+    if not os.path.isfile(composite_file) or overwrite:
+        print(f"Building composite PSF '{composite_name}'")
+        make_composite_psf(
+            composite_name, composites=composites,
+            psf_dir=psf_dir, outdir=outdir, overwrite=overwrite,
+        )
+
+    if not os.path.isfile(composite_file):
+        raise FileNotFoundError(
+            f"Composite PSF not found after build attempt: {composite_file}"
+        )
+
+    with fits.open(composite_file) as hdul:
+        composite_data = np.array(hdul[0].data, dtype=float)
+        composite_pix = get_pixscale(hdul[0].header)
+
+    composite_data = composite_data / np.nansum(composite_data)
+
+    sz_y, sz_x = composite_data.shape
+    yy, xx = np.meshgrid(np.arange(sz_x) - (sz_x - 1) / 2,
+                         np.arange(sz_y) - (sz_y - 1) / 2)
+    sigma_pix = fwhm / 2.355 / composite_pix
+    target_psf = makeGaussian_2D((xx, yy), (0, 0), (sigma_pix, sigma_pix))
+    target_psf = target_psf / np.nansum(target_psf)
+
+    target_name = 'gauss{:.2f}'.format(fwhm)
+    source_name = f"composite_{composite_name}"
+    grid_size_arcsec = np.array(composite_data.shape, dtype=float) * composite_pix
+
+    kk = MakeConvolutionKernel(
+        source_psf=composite_data,
+        source_pixscale=composite_pix,
+        source_name=source_name,
+        target_psf=target_psf,
+        target_pixscale=composite_pix,
+        target_fwhm=fwhm,
+        target_name=target_name,
+        common_pixscale=composite_pix,
+        grid_size_arcsec=grid_size_arcsec,
+        verbose=verbose,
+    )
+    kk.make_convolution_kernel_from_processed()
+
+    if save_kernel:
+        add_keys = {
+            "COMPNAME": (composite_name, "Composite PSF name"),
+            "TGTFWHM": (fwhm, "Target Gaussian FWHM (arcsec)"),
+        }
+        kk.write_out_kernel(outdir=str(outdir), add_keys=add_keys,
+                            naming_convention='PHANGS', print_name=True)
+    else:
+        print("Kernel not saved")
+
+    if save_plots:
+        if plot_dir is None:
+            plot_dir = os.path.join(str(outdir), 'plots')
+        plot_kernel_diagnostic(kk, plot_dir=plot_dir)
+
+    return kk
+
+
+def check_composite_gauss_kernel_exists(composite_name, fwhm, outdir):
+    """Check whether a composite -> Gaussian kernel already exists on disk.
+
+    Mirrors the PHANGS naming convention used by
+    :meth:`MakeConvolutionKernel.write_out_kernel` (lowercase
+    ``source_name_to_target_name.fits``, with ``"."`` -> ``"p"``).
+    """
+    target_label = 'gauss{:.2f}'.format(fwhm).replace('.', 'p').lower()
+    source_label = f"composite_{composite_name}".lower()
+    kernel_file = os.path.join(str(outdir),
+                               f"{source_label}_to_{target_label}.fits")
+    if os.path.isfile(kernel_file):
+        return True, kernel_file
+    return False, None
+
+
+def make_composite_gauss_worker(task):
+    """Worker function for parallel composite-to-Gaussian kernel generation.
+
+    Parameters
+    ----------
+    task : tuple
+        (composite_name, fwhm, psf_dir, outdir, overwrite,
+         composites_config_path, save_plots, plot_dir)
+
+    Returns
+    -------
+    dict
+        Result dictionary with status and info.
+    """
+    (composite_name, fwhm, psf_dir, outdir, overwrite,
+     composites_config_path, save_plots, plot_dir) = task
+
+    try:
+        exists, kernel_file = check_composite_gauss_kernel_exists(
+            composite_name, fwhm, outdir)
+
+        if exists and not overwrite:
+            return {
+                'success': True,
+                'composite': composite_name,
+                'fwhm': fwhm,
+                'status': 'skipped',
+                'message': f"SKIPPED (exists: {os.path.basename(kernel_file)})"
+            }
+
+        status = 'overwriting' if exists else 'creating'
+
+        composites = load_composites_config(composites_config_path)
+
+        make_composite_to_Gauss_kernel(
+            composite_name, fwhm,
+            composites=composites,
+            psf_dir=psf_dir, outdir=outdir,
+            overwrite=overwrite, save_kernel=True,
+            save_plots=save_plots, plot_dir=plot_dir,
+        )
+
+        return {
+            'success': True,
+            'composite': composite_name,
+            'fwhm': fwhm,
+            'status': status,
+            'message': f"{'OVERWRITTEN' if exists else 'CREATED'}"
+        }
+
+    except Exception as e:
+        return {
+            'success': False,
+            'composite': composite_name,
+            'fwhm': fwhm,
+            'status': 'error',
+            'message': f"ERROR: {str(e)}"
+        }
+
+
+def process_composite_gauss(
+        composite_names, fwhms, n_procs=1,
+        psf_dir=None, outdir=None, overwrite=False,
+        composites_config=None,
+        save_plots=False, plot_dir=None):
+    """Batch-process composite -> Gaussian matching kernels.
+
+    Parameters
+    ----------
+    composite_names : list[str]
+        Composite PSF names to use as kernel sources. Each must be a key in
+        the composites config.
+    fwhms : list[float]
+        Target Gaussian FWHMs in arcsec. Every (composite, fwhm) combination
+        becomes one kernel.
+    n_procs : int
+        Number of parallel processes.
+    psf_dir : str
+        Directory containing raw PSFs (used only if a composite or its
+        component PSFs need to be regenerated).
+    outdir : str
+        Directory containing composite PSFs and where output kernels are
+        written.
+    overwrite : bool
+        If True, regenerate kernels even if they already exist on disk.
+    composites_config : str, optional
+        Path to ``composites.toml``. Required so workers can reload it
+        independently in each subprocess. Defaults to
+        ``<outdir>/composites.toml``.
+    save_plots : bool
+        If True, also write a diagnostic PNG for each kernel.
+    plot_dir : str, optional
+        Directory for diagnostic PNGs.
+    """
+    if not composite_names:
+        print("No composites to process.")
+        return
+    if not fwhms:
+        raise ValueError("fwhms must contain at least one value")
+
+    if composites_config is None:
+        composites_config = os.path.join(str(outdir), "composites.toml")
+
+    print("\n=== Processing composite -> Gaussian kernels ===")
+    print(f"Composites: {composite_names}")
+    print(f"Target FWHMs: {fwhms}")
+    print(f"Using {n_procs} parallel processes")
+
+    tasks = []
+    for name in composite_names:
+        for fwhm in fwhms:
+            tasks.append((name, fwhm, psf_dir, outdir, overwrite,
+                          composites_config, save_plots, plot_dir))
+
+    print(f"Total tasks: {len(tasks)}")
+
+    if n_procs > 1:
+        with mp.Pool(n_procs) as pool:
+            results = pool.map(make_composite_gauss_worker, tasks)
+    else:
+        results = [make_composite_gauss_worker(task) for task in tasks]
+
+    created = sum(1 for r in results if r['status'] in ['creating', 'overwriting'])
+    skipped = sum(1 for r in results if r['status'] == 'skipped')
+    errors = sum(1 for r in results if r['status'] == 'error')
+
+    for result in results:
+        name = result['composite']
+        fwhm = result['fwhm']
+        msg = result['message']
+        print(f"  composite_{name} @ {fwhm} arcsec: {msg}")
+
+    print(f"\nComposite -> Gaussian kernel summary: "
           f"{created} created, {skipped} skipped, {errors} errors")
 
 
@@ -1388,6 +2132,23 @@ End-to-end (--all-products) Examples:
   %(prog)s all  --all-products --config config.toml -j 8         # Processed PSFs + matching kernels + processed kernels
   %(prog)s miri --all-products --config config.toml -j 8 \\
       --from-variant nocirc_filt --to-variant circ_filt          # MIRI only, custom variant pair
+
+Composite PSF Examples:
+  %(prog)s --composite alpha --config config.toml                # Build specific composite
+  %(prog)s --composite all --config config.toml                  # Build all composites
+  %(prog)s --composite all --config config.toml \\
+      --composites-config /path/to/composites.toml               # Custom composites file
+  %(prog)s --list-composites --composites-config composites.toml # List available composites
+
+Composite -> Gaussian Kernel Examples:
+  %(prog)s --from-composite alpha --to-gauss 0.9 --config config.toml  # Single composite -> Gaussian
+  %(prog)s --composite all --to-gauss 0.9 --config config.toml -j 4    # Build all composites + composite->0.9" kernels
+
+Diagnostic Plot Examples (works with any kernel mode):
+  %(prog)s --from F335M --to-gauss 0.9 --config config.toml --save-plots
+  %(prog)s --composite all --to-gauss 0.9 --config config.toml -j 4 \\
+      --save-plots --plot-dir /tmp/kernel_plots
+  %(prog)s all --config config.toml -j 8 --save-plots
         """)
     
     parser.add_argument('cameras', nargs='*', default=None,
@@ -1478,11 +2239,79 @@ End-to-end (--all-products) Examples:
     
     parser.add_argument('--kernel-dir', dest='kernel_dir', type=str, default=None,
                         help='Output directory for kernels (alternative to --config)')
-    
+
+    parser.add_argument('--composite', dest='composite', type=str, default=None,
+                        help='Build composite PSF(s): specific name or "all"')
+
+    parser.add_argument('--composites-config', dest='composites_config', type=str,
+                        default=None,
+                        help='Path to composites.toml (default: composites.toml in kernel_dir)')
+
+    parser.add_argument('--list-composites', dest='list_composites', action='store_true',
+                        help='List available composite PSF definitions and exit')
+
+    parser.add_argument('--from-composite', dest='from_composite', type=str,
+                        default=None,
+                        help='Source composite PSF name for single kernel '
+                             'generation (use with --to-gauss). Auto-builds '
+                             'the composite if missing.')
+
+    parser.add_argument('--save-plots', dest='save_plots', action='store_true',
+                        help='For every kernel that gets created, save a '
+                             'diagnostic PNG (source PSF, target PSF, kernel, '
+                             'radial profile, and Aniano D / W_- statistics).')
+
+    parser.add_argument('--plot-dir', dest='plot_dir', type=str, default=None,
+                        help='Directory for diagnostic plots (default: '
+                             '<kernel_dir>/plots). Requires --save-plots.')
+
     args = parser.parse_args()
     
     # Set global overwrite flag
     overwrite = args.overwrite
+
+    # Handle --list-composites early: only needs --composites-config, not directories.
+    if args.list_composites:
+        composites_path = args.composites_config
+        if composites_path is None:
+            if args.kernel_dir is None and args.local_config is None:
+                parser.error(
+                    "--list-composites requires either --composites-config "
+                    "or --kernel-dir/--config to locate composites.toml"
+                )
+            tmp_outdir = args.kernel_dir
+            if tmp_outdir is None and args.local_config is not None:
+                try:
+                    with open(args.local_config.strip(), "rb") as f:
+                        tmp_outdir = tomllib.load(f).get('kernel_dir')
+                except (FileNotFoundError, tomllib.TOMLDecodeError):
+                    tmp_outdir = None
+            if tmp_outdir is None:
+                parser.error("Could not resolve composites.toml location")
+            composites_path = os.path.join(tmp_outdir, "composites.toml")
+        try:
+            composites = load_composites_config(composites_path)
+        except FileNotFoundError:
+            print(f"Composites config not found: {composites_path}")
+            print("Create a composites.toml file or specify --composites-config")
+            return 1
+        except (tomllib.TOMLDecodeError, ValueError) as e:
+            print(f"Error loading composites config: {e}")
+            return 1
+
+        print(f"Available composite PSFs (from {composites_path}):\n")
+        for name, recipe in composites.items():
+            desc = recipe.get("description", "(no description)")
+            print(f"  {name}")
+            print(f"    Description: {desc}")
+            print(f"    Components:")
+            for comp in recipe["components"]:
+                if "name" in comp:
+                    print(f"      - composite: {comp['name']}")
+                else:
+                    print(f"      - {comp['band']} ({comp['variant']})")
+            print()
+        return 0
 
     # Parse & validate --psf-variants (only meaningful under --just-processed-psf,
     # but we parse it unconditionally so errors surface early).
@@ -1546,6 +2375,28 @@ End-to-end (--all-products) Examples:
                 f"(got both={args.from_variant})."
             )
 
+    # Validate --from-composite mutual exclusions and required pairings
+    if args.from_composite:
+        if args.from_band:
+            parser.error("--from-composite is mutually exclusive with --from")
+        if args.to_band:
+            parser.error("--from-composite is mutually exclusive with --to")
+        if args.just_processed_psf:
+            parser.error("--from-composite is mutually exclusive with --just-processed-psf")
+        if args.processed_kernel:
+            parser.error("--from-composite is mutually exclusive with --processed-kernel")
+        if args.all_products:
+            parser.error("--from-composite is mutually exclusive with --all-products")
+        if args.composite:
+            parser.error("--from-composite is mutually exclusive with --composite "
+                         "(use one or the other)")
+        if args.to_gauss is None:
+            parser.error("--from-composite requires --to-gauss FWHM")
+
+    # Validate --plot-dir requires --save-plots
+    if args.plot_dir is not None and not args.save_plots:
+        parser.error("--plot-dir requires --save-plots")
+
     # Set directories from CLI args or config file
     # CLI args take precedence over config file
     psf_dir = args.psf_dir
@@ -1581,7 +2432,100 @@ End-to-end (--all-products) Examples:
     print("Using directories:")
     print("... PSF directory: ", psf_dir)
     print("... Kernel directory: ", outdir)
-        
+
+    # Resolve plot directory once up-front so every code path can use it.
+    plot_dir = None
+    if args.save_plots:
+        plot_dir = args.plot_dir or os.path.join(str(outdir), "plots")
+        os.makedirs(plot_dir, exist_ok=True)
+        print("... Plot directory: ", plot_dir)
+
+    # Resolve number of parallel processes once up-front (used by composite
+    # batches as well as the rest of batch mode).
+    n_procs = max(1, min(args.jobs, mp.cpu_count()))
+    if args.jobs != n_procs:
+        print(f"Note: Adjusted number of processes from {args.jobs} to {n_procs}")
+
+    # Handle --from-composite (single composite -> Gaussian kernel)
+    if args.from_composite:
+        composites_path = args.composites_config
+        if composites_path is None:
+            composites_path = os.path.join(outdir, "composites.toml")
+        try:
+            composites = load_composites_config(composites_path)
+        except FileNotFoundError:
+            print(f"Composites config not found: {composites_path}")
+            print("Create a composites.toml file or specify --composites-config")
+            return 1
+        except (tomllib.TOMLDecodeError, ValueError) as e:
+            print(f"Error loading composites config: {e}")
+            return 1
+
+        try:
+            make_composite_to_Gauss_kernel(
+                args.from_composite, args.to_gauss,
+                composites=composites,
+                composites_config=composites_path,
+                psf_dir=psf_dir, outdir=outdir,
+                overwrite=overwrite,
+                save_plots=args.save_plots, plot_dir=plot_dir,
+            )
+        except (ValueError, FileNotFoundError) as e:
+            print(f"Error: {e}")
+            return 1
+        print("\n=== Done ===")
+        return 0
+
+    # Handle --composite
+    if args.composite:
+        composites_path = args.composites_config
+        if composites_path is None:
+            composites_path = os.path.join(outdir, "composites.toml")
+        try:
+            composites = load_composites_config(composites_path)
+        except FileNotFoundError:
+            print(f"Composites config not found: {composites_path}")
+            print("Create a composites.toml file or specify --composites-config")
+            return 1
+        except (tomllib.TOMLDecodeError, ValueError) as e:
+            print(f"Error loading composites config: {e}")
+            return 1
+
+        print(f"Loaded composites from: {composites_path}")
+
+        if args.composite.lower() == "all":
+            names_to_build = list(composites.keys())
+        else:
+            if args.composite not in composites:
+                print(f"Unknown composite: '{args.composite}'")
+                print(f"Available: {sorted(composites.keys())}")
+                return 1
+            names_to_build = [args.composite]
+
+        process_composite_psfs(
+            names=names_to_build,
+            composites=composites,
+            psf_dir=psf_dir,
+            outdir=outdir,
+            overwrite=overwrite,
+        )
+
+        if args.to_gauss is not None:
+            process_composite_gauss(
+                composite_names=names_to_build,
+                fwhms=[args.to_gauss],
+                n_procs=n_procs,
+                psf_dir=psf_dir,
+                outdir=outdir,
+                overwrite=overwrite,
+                composites_config=composites_path,
+                save_plots=args.save_plots,
+                plot_dir=plot_dir,
+            )
+
+        print("\n=== Done ===")
+        return 0
+
     # Single kernel mode
     if args.from_band:
         if args.just_processed_psf:
@@ -1610,6 +2554,7 @@ End-to-end (--all-products) Examples:
                     to_variant=args.to_variant,
                     psf_dir=psf_dir, outdir=outdir,
                     overwrite=overwrite,
+                    save_plots=args.save_plots, plot_dir=plot_dir,
                 )
             except (ValueError, FileNotFoundError) as e:
                 print(f"Error: {e}")
@@ -1622,20 +2567,24 @@ End-to-end (--all-products) Examples:
                          "or --processed-kernel")
         if args.to_band and args.to_gauss is not None:
             parser.error("Cannot use both --to and --to-gauss together")
-        
+
         try:
             if args.to_band:
                 make_single_cross_kernel(args.from_band, args.to_band,
                                          psf_dir=psf_dir, outdir=outdir,
-                                         overwrite=overwrite)
+                                         overwrite=overwrite,
+                                         save_plots=args.save_plots,
+                                         plot_dir=plot_dir)
             else:
                 make_single_gaussian_kernel(args.from_band, args.to_gauss,
                                             psf_dir=psf_dir, outdir=outdir,
-                                            overwrite=overwrite)
+                                            overwrite=overwrite,
+                                            save_plots=args.save_plots,
+                                            plot_dir=plot_dir)
         except ValueError as e:
             print(f"Error: {e}")
             return 1
-        
+
         print("\n=== Done ===")
         return 0
     
@@ -1646,12 +2595,7 @@ End-to-end (--all-products) Examples:
     # Set default cameras if none specified
     if args.cameras is None or len(args.cameras) == 0:
         args.cameras = ['all']
-    
-    # Validate number of jobs
-    n_procs = max(1, min(args.jobs, mp.cpu_count()))
-    if args.jobs != n_procs:
-        print(f"Note: Adjusted number of processes from {args.jobs} to {n_procs}")
-    
+
     if overwrite:
         print("*** OVERWRITE MODE: Existing kernels will be regenerated ***\n")
     else:
@@ -1693,7 +2637,8 @@ End-to-end (--all-products) Examples:
             psf_dir=psf_dir, outdir=outdir,
             overwrite=overwrite,
             from_variant=args.from_variant,
-            to_variant=args.to_variant)
+            to_variant=args.to_variant,
+            save_plots=args.save_plots, plot_dir=plot_dir)
         print("\n=== Done ===")
         return 0
 
@@ -1722,21 +2667,26 @@ End-to-end (--all-products) Examples:
         if 'miri' in cameras:
             process_miri_gauss(
                 n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
-                overwrite=overwrite)
+                overwrite=overwrite,
+                save_plots=args.save_plots, plot_dir=plot_dir)
             process_miri_cross(
                 n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
-                overwrite=overwrite)
+                overwrite=overwrite,
+                save_plots=args.save_plots, plot_dir=plot_dir)
         if 'nircam' in cameras:
             process_nircam_gauss(
                 n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
-                overwrite=overwrite)
+                overwrite=overwrite,
+                save_plots=args.save_plots, plot_dir=plot_dir)
             process_nircam_cross(
                 n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
-                overwrite=overwrite)
+                overwrite=overwrite,
+                save_plots=args.save_plots, plot_dir=plot_dir)
         if 'cross' in cameras:
             process_cross_instrument(
                 n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
-                overwrite=overwrite)
+                overwrite=overwrite,
+                save_plots=args.save_plots, plot_dir=plot_dir)
 
         # Part 3: processed-to-processed kernels
         print(f"\n--- Part 3/3: processed-to-processed kernels "
@@ -1746,7 +2696,8 @@ End-to-end (--all-products) Examples:
             psf_dir=psf_dir, outdir=outdir,
             overwrite=overwrite,
             from_variant=args.from_variant,
-            to_variant=args.to_variant)
+            to_variant=args.to_variant,
+            save_plots=args.save_plots, plot_dir=plot_dir)
 
         print("\n=== Done ===")
         return 0
@@ -1754,25 +2705,30 @@ End-to-end (--all-products) Examples:
     if 'miri' in cameras:
         process_miri_gauss(
             n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
-            overwrite=overwrite)
-        
+            overwrite=overwrite,
+            save_plots=args.save_plots, plot_dir=plot_dir)
+
         process_miri_cross(
             n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
-            overwrite=overwrite)
-    
+            overwrite=overwrite,
+            save_plots=args.save_plots, plot_dir=plot_dir)
+
     if 'nircam' in cameras:
         process_nircam_gauss(
             n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
-            overwrite=overwrite)
-        
+            overwrite=overwrite,
+            save_plots=args.save_plots, plot_dir=plot_dir)
+
         process_nircam_cross(
             n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
-            overwrite=overwrite)
-   
+            overwrite=overwrite,
+            save_plots=args.save_plots, plot_dir=plot_dir)
+
     if 'cross' in cameras:
         process_cross_instrument(
             n_procs=n_procs, psf_dir=psf_dir, outdir=outdir,
-            overwrite=overwrite)
+            overwrite=overwrite,
+            save_plots=args.save_plots, plot_dir=plot_dir)
     
     print("\n=== Done ===")
 
