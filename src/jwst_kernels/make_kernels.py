@@ -238,6 +238,83 @@ Notes
 - ``all --just-processed-psf`` generates Aniano-processed PSFs for every
   MIRI and NIRCam band (no kernels are produced in that mode).
 
+Programmatic Usage (run() function)
+-----------------------------------
+All CLI functionality is also available via the ``run()`` function, which
+can be imported and called directly from Python scripts:
+
+    from jwst_kernels.make_kernels import run
+
+**Batch processing:**
+
+    # Process all MIRI bands (Gaussian + cross kernels)
+    run(cameras=['miri'], config='config.toml', n_procs=8)
+
+    # Process everything
+    run(cameras=['all'], config='config.toml', n_procs=8, overwrite=True)
+
+    # With explicit paths instead of config
+    run(cameras=['miri'], psf_dir='/path/to/psfs',
+        kernel_dir='/path/to/kernels', n_procs=8)
+
+**Single kernel generation:**
+
+    # Cross kernel: NIRCam F200W to MIRI F770W
+    run(from_band='F200W', to_band='F770W', config='config.toml')
+
+    # Gaussian kernel: MIRI F770W to 7.5" Gaussian
+    run(from_band='F770W', to_gauss=7.5, config='config.toml')
+
+**Aniano-processed PSFs:**
+
+    # Single band, default variant
+    run(from_band='F335M', just_processed_psf=True, config='config.toml')
+
+    # Single band, multiple variants
+    run(from_band='F335M', just_processed_psf=True,
+        psf_variants=['circ_filt', 'nocirc_nofilt'], config='config.toml')
+
+    # Batch all MIRI bands
+    run(cameras=['miri'], just_processed_psf=True,
+        config='config.toml', n_procs=8)
+
+**Processed-to-processed kernels:**
+
+    # Single band, default variants (nocirc_nofilt -> circ_filt)
+    run(from_band='F335M', processed_kernel=True, config='config.toml')
+
+    # Custom variants
+    run(from_band='F770W', processed_kernel=True,
+        from_variant='nocirc_filt', to_variant='circ_filt',
+        config='config.toml')
+
+**End-to-end pipeline (--all-products):**
+
+    run(cameras=['all'], all_products=True, config='config.toml', n_procs=8)
+
+**Composite PSF -> Gaussian kernels:**
+
+    # Single composite -> Gaussian
+    run(from_composite='alpha', to_gauss=0.9, config='config.toml')
+
+    # Build all composites + kernels to 0.9" Gaussian
+    run(composite='all', to_gauss=0.9, config='config.toml', n_procs=4)
+
+**Auto-regenerate for mixed pixel scales (NIRCam SW + LW):**
+
+    # When mixing NIRCam SW (~0.0078"/pix) and LW (~0.0157"/pix) bands in
+    # a composite, use auto_regen=True to automatically regenerate coarser
+    # PSFs at the finer pixel scale (saved with _pixNpNNNN suffix):
+    run(composite='F150WxF300M', config='config.toml', auto_regen=True)
+
+**Diagnostic plots:**
+
+    run(from_band='F335M', to_gauss=0.9, config='config.toml',
+        save_plots=True, plot_dir='/tmp/kernel_plots')
+
+The ``run()`` function returns 0 on success, 1 on error. It raises
+``ValueError`` for invalid parameter combinations.
+
 """
 
 import sys, os, glob
